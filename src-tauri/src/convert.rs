@@ -39,7 +39,11 @@ const VIDEO: Duration = Duration::from_secs(3600);
 /// The only containers ffmpeg may read: the ones the wheel accepts. Anything else, a
 /// playlist or concat list disguised as a video for example, is refused instead of
 /// being followed to other files or the network.
-const FFMPEG_FORMATS: &str = "mov,mp4,m4a,matroska,webm,avi,mp3,wav,flac,aiff,ogg,aac,asf,srt,webvtt";
+/// Never a playlist, concat list, image sequence or network stream: those read other
+/// files or addresses.
+const FFMPEG_FORMATS: &str = "mov,mp4,m4a,matroska,webm,avi,mp3,wav,flac,aiff,ogg,aac,asf,srt,webvtt,\
+     mpeg,mpegvideo,mpegts,flv,dv,mxf,rm,wtv,h264,hevc,dhav,bink,flic,\
+     ac3,eac3,amr,amrnb,amrwb,au,caf,dss,voc,wv,tta,w64,ape,mpc,mpc8,tak,dsf,iff,dts";
 
 /// At most 1920 on the long side, and even sizes, which the video encoders need. For
 /// Compress, and for the old formats (AVI, WMV), whose players can't take 4K.
@@ -1445,7 +1449,7 @@ fn video(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> 
     match target {
         // MP4, MOV and M4V usually hold the same streams, and Matroska nearly any: a fast
         // copy first.
-        "mp4" | "mov" if matches!(ext, "mp4" | "mov" | "m4v") && copy_streams(src, &["-movflags", "+faststart"], out) => Ok(()),
+        "mp4" | "mov" if matches!(formats::canonical(ext), "mp4" | "mov" | "m4v") && copy_streams(src, &["-movflags", "+faststart"], out) => Ok(()),
         "mkv" if copy_streams(src, &[], out) => Ok(()),
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "wmv" => {
             let args = video_encode(target).ok_or_else(|| format!("video can't become .{target}"))?;
@@ -5686,7 +5690,8 @@ mod tests {
         ];
         let mut tested = Vec::new();
         for (ext, coder, size) in cases {
-            let src = work.path().join(format!("picture {ext}.{ext}"));
+            // No space in the name: XBM keeps it as a C name inside the file.
+            let src = work.path().join(format!("picture_{ext}.{ext}"));
             let mut write = Command::new(magick().unwrap());
             write.arg(&made).arg(format!("{coder}:{}", src.display()));
             if !write.status().unwrap().success() {
@@ -5796,6 +5801,103 @@ mod tests {
         }
         file.extend(vec![0u8; 40_000]);
         file
+    }
+
+    /// What ffprobe finds in a file: a picture stream, a sound stream, and its length.
+    fn media_streams(path: &Path) -> (bool, bool, f64) {
+        let out = Command::new(tool("ffprobe").unwrap())
+            .args(["-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "default=nw=1"])
+            .arg(path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let seconds = text.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|d| d.parse().ok()).unwrap_or(0.0);
+        (text.contains("codec_type=video"), text.contains("codec_type=audio"), seconds)
+    }
+
+    /// Every new video and sound container ffmpeg here can write: made from a second of
+    /// test picture and tone, converted, and the result checked for its streams.
+    #[test]
+    fn more_video_and_sound_containers_convert() {
+        if tool("ffmpeg").is_err() || tool("ffprobe").is_err() {
+            eprintln!("ffmpeg isn't installed: containers not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let picture = ["-f", "lavfi", "-i", "testsrc=size=176x144:rate=25:duration=1"];
+        let tone = ["-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=48000"];
+        // (extension, muxer and codecs; picture and sound, or sound only)
+        let video: &[(&str, &[&str])] = &[
+            ("mpg", &["-c:v", "mpeg1video", "-c:a", "mp2", "-f", "mpeg"]),
+            ("mpeg", &["-c:v", "mpeg1video", "-c:a", "mp2", "-f", "mpeg"]),
+            ("vob", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "vob"]),
+            ("mod", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "vob"]),
+            ("ts", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "mpegts"]),
+            ("mts", &["-c:v", "libx264", "-c:a", "ac3", "-f", "mpegts", "-mpegts_m2ts_mode", "1"]),
+            ("m2ts", &["-c:v", "libx264", "-c:a", "ac3", "-f", "mpegts", "-mpegts_m2ts_mode", "1"]),
+            ("3gp", &["-c:v", "libx264", "-c:a", "aac", "-f", "3gp"]),
+            ("3g2", &["-c:v", "libx264", "-c:a", "aac", "-f", "3g2"]),
+            ("ogv", &["-c:v", "libvpx", "-c:a", "libopus", "-f", "ogg"]),
+            ("flv", &["-c:v", "flv1", "-c:a", "aac", "-f", "flv"]),
+            ("f4v", &["-c:v", "libx264", "-c:a", "aac", "-f", "f4v"]),
+            ("mxf", &["-c:v", "mpeg2video", "-c:a", "pcm_s16le", "-f", "mxf"]),
+            ("divx", &["-c:v", "mpeg4", "-c:a", "libmp3lame", "-f", "avi"]),
+            ("asf", &["-c:v", "wmv2", "-c:a", "wmav2", "-f", "asf"]),
+            ("dvr-ms", &["-c:v", "wmv2", "-c:a", "wmav2", "-f", "asf"]),
+            ("qt", &["-c:v", "libx264", "-c:a", "aac", "-f", "mov"]),
+            ("rm", &["-c:v", "rv20", "-c:a", "ac3", "-f", "rm"]),
+            ("wtv", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "wtv"]),
+            // DV: PAL size and stereo sound, the only kind it holds.
+            ("dv", &["-c:v", "dvvideo", "-s", "720x576", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ac", "2", "-f", "dv"]),
+            ("m2v", &["-an", "-c:v", "mpeg2video", "-f", "mpeg2video"]),
+            ("h264", &["-an", "-c:v", "libx264", "-f", "h264"]),
+            ("hevc", &["-an", "-c:v", "libx265", "-f", "hevc"]),
+        ];
+        let sound: &[(&str, &[&str])] = &[
+            ("m4b", &["-c:a", "aac", "-f", "ipod"]),
+            ("m4r", &["-c:a", "aac", "-f", "ipod"]),
+            ("wave", &["-c:a", "pcm_s16le", "-f", "wav"]),
+            ("oga", &["-c:a", "flac", "-f", "ogg"]),
+            ("aifc", &["-c:a", "pcm_alaw", "-f", "aiff"]),
+            ("ac3", &["-c:a", "ac3", "-f", "ac3"]),
+            ("eac3", &["-c:a", "eac3", "-f", "eac3"]),
+            ("au", &["-c:a", "pcm_s16be", "-f", "au"]),
+            ("caf", &["-c:a", "pcm_s16le", "-f", "caf"]),
+            ("weba", &["-c:a", "libopus", "-f", "webm"]),
+            ("mka", &["-c:a", "flac", "-f", "matroska"]),
+            ("mp2", &["-c:a", "mp2", "-f", "mp2"]),
+            ("voc", &["-c:a", "pcm_u8", "-f", "voc"]),
+            ("wv", &["-c:a", "wavpack", "-f", "wv"]),
+            ("tta", &["-c:a", "tta", "-f", "tta"]),
+            ("w64", &["-c:a", "pcm_s16le", "-f", "w64"]),
+            ("dts", &["-c:a", "dca", "-strict", "-2", "-f", "dts"]),
+        ];
+        let mut tested = Vec::new();
+        for (ext, muxer, has_sound) in video.iter().map(|(e, m)| (e, m, !m.contains(&"-an"))).chain(sound.iter().map(|(e, m)| (e, m, true))) {
+            let picture_too = video.iter().any(|(e, _)| e == ext);
+            let src = work.path().join(format!("clip {ext}.{ext}"));
+            let mut make = Command::new(tool("ffmpeg").unwrap());
+            make.args(["-v", "error", "-y"]);
+            if picture_too {
+                make.args(picture);
+            }
+            if has_sound {
+                make.args(tone);
+            }
+            make.args(["-t", "1"]).args(*muxer).arg(&src).stdin(Stdio::null());
+            if !make.status().unwrap().success() || !src.is_file() {
+                eprintln!("this ffmpeg can't write .{ext}: not tested");
+                continue;
+            }
+            let target = if picture_too { "mp4" } else { "mp3" };
+            let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            let (picture_out, sound_out, seconds) = media_streams(&out);
+            assert_eq!((picture_out, sound_out), (picture_too, has_sound), ".{ext}");
+            assert!((0.7..1.4).contains(&seconds), ".{ext}: {seconds} s");
+            tested.push(*ext);
+        }
+        eprintln!("containers tested: {}", tested.join(" "));
+        assert!(tested.len() >= 25, "{tested:?}");
     }
 
     #[cfg(target_os = "macos")]

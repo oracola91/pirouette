@@ -96,12 +96,26 @@ const KINDS: &[(Kind, &[&str], &[&str])] = &[
     ),
     (
         Kind::Audio,
-        &["mp3", "wav", "m4a", "aac", "flac", "aiff", "aif", "ogg", "opus", "wma"],
+        // After the ones it also writes: audiobooks and ringtones (MP4), Dolby, DTS,
+        // phone (AMR), Apple's CAF, Sun's AU, lossless (WavPack, TTA, APE, TAK),
+        // Musepack, DSD (DSF), Speex, dictation (DSS) and older sound files.
+        &[
+            "mp3", "wav", "m4a", "aac", "flac", "aiff", "aif", "ogg", "opus", "wma", "m4b", "m4r", "wave", "oga", "aifc", "ac3",
+            "eac3", "ec3", "amr", "au", "snd", "caf", "weba", "mka", "mp2", "mpa", "dss", "voc", "wv", "tta", "w64", "ape",
+            "mpc", "mpp", "tak", "dsf", "dts", "spx",
+        ],
         &["mp3", "m4a", "wav", "flac", "aiff", "ogg", "opus", "wma"],
     ),
     (
         Kind::Video,
-        &["mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv"],
+        // After the ones it also writes: MPEG and DVD, camcorder (MTS, M2TS, MOD, TOD,
+        // DV), phone (3GP), Flash, broadcast (TS, MXF), RealMedia, recorded TV, raw
+        // H.264 and HEVC, security cameras (DAV), Bink and FLIC animations.
+        &[
+            "mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv", "mpg", "mpeg", "mpe", "m1v", "m2v", "ts", "m2ts", "mts", "m2t",
+            "3gp", "3gpp", "3g2", "ogv", "vob", "flv", "f4v", "dv", "dif", "mxf", "divx", "asf", "qt", "mod", "tod", "rm",
+            "rmvb", "wtv", "dvr-ms", "h264", "264", "h265", "265", "hevc", "dav", "bik", "flc", "fli",
+        ],
         &["mp4", "mov", "webm", "mkv", "avi", "wmv", "gif", "mp3"],
     ),
     // RTFD (a folder: macOS rich text with its pictures) and text clippings (what
@@ -387,6 +401,9 @@ pub fn canonical(ext: &str) -> &str {
         "heif" | "hif" => "heic",
         "dib" => "bmp",
         "aif" => "aiff",
+        "wave" => "wav",
+        "oga" => "ogg",
+        "qt" => "mov",
         "htm" => "html",
         "markdown" => "md",
         other => other,
