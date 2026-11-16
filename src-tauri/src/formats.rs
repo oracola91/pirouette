@@ -85,6 +85,13 @@ pub const MORE_PICTURES: &[&str] = &[
 pub const MORE_ROW: &str = "image-more";
 const MORE_OFF: &[&str] = &["bmp"];
 
+/// Comic book archives: pictures in a ZIP (CBZ) or TAR (CBT), read by MuPDF as pages.
+/// Converted as PDFs, with a Settings row of their own: a comic has no words for the
+/// PDF row's text formats.
+pub const COMICS: &[&str] = &["cbz", "cbt"];
+pub const COMIC_ROW: &str = "comic";
+const COMIC_OUT: &[&str] = &["pdf", "jpg", "png"];
+
 /// What each kind of file is read from and can be turned into.
 const KINDS: &[(Kind, &[&str], &[&str])] = &[
     (
@@ -409,6 +416,9 @@ pub fn kind_of(ext: &str) -> Option<Kind> {
     if MORE_PICTURES.contains(&ext) {
         return Some(Kind::Image);
     }
+    if COMICS.contains(&ext) {
+        return Some(Kind::Pdf);
+    }
     KINDS.iter().find(|(_, ins, _)| ins.contains(&ext)).map(|(k, _, _)| *k)
 }
 
@@ -418,6 +428,9 @@ pub fn outputs_for(ext: &str) -> &'static [&'static str] {
     }
     if MORE_PICTURES.contains(&ext) {
         return IMAGE_OUT;
+    }
+    if COMICS.contains(&ext) {
+        return COMIC_OUT;
     }
     KINDS
         .iter()
@@ -454,18 +467,29 @@ pub struct Row {
     pub off: &'static [&'static str],
 }
 
-/// Every row, in Settings order: one per kind, with Other pictures after Pictures.
+/// Every row, in Settings order: one per kind, with Other pictures after Pictures and
+/// Comics after PDFs.
 pub fn rows() -> impl Iterator<Item = Row> {
     KINDS.iter().flat_map(|(kind, _, outs)| {
         let row = Row { key: kind.key(), label: kind.label(), outputs: outs, off: &[] };
-        let more = (*kind == Kind::Image).then_some(Row { key: MORE_ROW, label: "Other pictures", outputs: IMAGE_OUT, off: MORE_OFF });
+        let more = match kind {
+            Kind::Image => Some(Row { key: MORE_ROW, label: "Other pictures", outputs: IMAGE_OUT, off: MORE_OFF }),
+            Kind::Pdf => Some(Row { key: COMIC_ROW, label: "Comics", outputs: COMIC_OUT, off: &[] }),
+            _ => None,
+        };
         std::iter::once(row).chain(more)
     })
 }
 
 /// The Settings row whose choices count for .`ext` files. Camera RAW follows Pictures.
 pub fn row_of(ext: &str) -> Option<&'static str> {
-    if MORE_PICTURES.contains(&ext) { Some(MORE_ROW) } else { kind_of(ext).map(Kind::key) }
+    if MORE_PICTURES.contains(&ext) {
+        Some(MORE_ROW)
+    } else if COMICS.contains(&ext) {
+        Some(COMIC_ROW)
+    } else {
+        kind_of(ext).map(Kind::key)
+    }
 }
 
 /// Whether `format` starts off the wheel in `row` until the user turns it on.
@@ -554,7 +578,7 @@ mod tests {
     #[test]
     fn rows_cover_every_kind_once() {
         let keys: Vec<_> = rows().map(|r| r.key).collect();
-        assert_eq!(keys, ["image", MORE_ROW, "audio", "video", "doc", "sheet", "slides", "pdf", "subs", "drawing"]);
+        assert_eq!(keys, ["image", MORE_ROW, "audio", "video", "doc", "sheet", "slides", "pdf", COMIC_ROW, "subs", "drawing"]);
         assert!(rows().all(|r| r.off.iter().all(|f| r.outputs.contains(f))));
     }
 

@@ -159,8 +159,8 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
     // Office files must really be what their name says. LibreOffice otherwise picks a
     // reader from the content: a broken .docx comes out as a PDF of its raw bytes, and
     // a web page saved as .doc is read as a web page.
-    // 64 bytes: a Windows enhanced metafile's mark is at 40.
-    let head = read_start(&input, 64)?;
+    // A Windows enhanced metafile's mark is at 40, a TAR's at 257.
+    let head = read_start(&input, 300)?;
     if !office_mark_fits(&head, &ext) {
         return Err(format!("this is not a valid .{ext} file"));
     }
@@ -223,6 +223,14 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
             libreoffice(&input, "pdf", &slides).and_then(|()| pdf(&slides, target, &out, &work))
         }
         (None, Kind::Sheet | Kind::Slides) => file(libreoffice(&input, target, &out)),
+        // Comics: MuPDF makes them a PDF first, a page per picture.
+        (None, Kind::Pdf) if formats::COMICS.contains(&ext.as_str()) => comic_to_pdf(&input, work.path()).and_then(|pages| {
+            if target == "pdf" {
+                fs::rename(&pages, &out).map(|()| Output::File).map_err(|e| format!("work folder: {e}"))
+            } else {
+                pdf(&pages, target, &out, &work)
+            }
+        }),
         (None, Kind::Pdf) => pdf(&input, target, &out, &work),
         // Drawings: LibreOffice Draw writes PDF and SVG itself; a picture of each page
         // is the PDF's pages drawn, as for slides.
@@ -389,6 +397,19 @@ fn sniff_image(head: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// A comic book archive (pictures in a ZIP or TAR) as a PDF in the work folder, a page
+/// per picture in name order (MuPDF).
+fn comic_to_pdf(src: &Path, work: &Path) -> Result<PathBuf, String> {
+    let pdf = work.join("comic.pdf");
+    let mut cmd = Command::new(tool("mutool")?);
+    cmd.args(["convert", "-F", "pdf", "-o"]).arg(&pdf).arg(src);
+    run(cmd, OFFICE)?;
+    if !pdf.is_file() {
+        return Err("MuPDF could not read this comic".into());
+    }
+    Ok(pdf)
+}
+
 /// Whether a file starts the way its office (or PDF) extension says. Any start fits
 /// the formats with no such check.
 fn office_mark_fits(head: &[u8], ext: &str) -> bool {
@@ -433,6 +454,9 @@ fn office_mark_fits(head: &[u8], ext: &str) -> bool {
             let first = lines.next().unwrap_or_default();
             return head.starts_with(b"AutoCAD Binary DXF") || first == "999" || (first == "0" && lines.next() == Some("SECTION"));
         }
+        // Comics: a ZIP, or a TAR ("ustar" at 257).
+        "cbz" => &[b"PK"],
+        "cbt" => return head.get(257..262) == Some(b"ustar"),
         _ => &[b""],
     };
     marks.iter().any(|m| head.starts_with(m))
@@ -6089,6 +6113,43 @@ mod tests {
             tested.push(ext);
         }
         eprintln!("text formats tested: {}", tested.join(" "));
+    }
+
+    /// A comic of three pictures, as a ZIP and as a TAR, becomes a three-page PDF and a
+    /// folder of three pictures.
+    #[test]
+    fn comics_become_pages() {
+        if magick().is_err() || tool("mutool").is_err() {
+            eprintln!("ImageMagick or MuPDF isn't installed: comics not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let pages = work.path().join("pages");
+        fs::create_dir(&pages).unwrap();
+        for i in 1..=3 {
+            let mut make = Command::new(magick().unwrap());
+            make.args(["-size", "60x80", &format!("xc:#{}0{}0{}0", i * 3, i * 2, i)]).arg(pages.join(format!("page{i}.png")));
+            assert!(make.status().unwrap().success());
+        }
+        let names = ["page1.png", "page2.png", "page3.png"];
+        let tar = Command::new("tar").current_dir(&pages).args(["cf", "../comic.cbt"]).args(names).status().unwrap();
+        assert!(tar.success());
+        let mut cbz = fs::File::create(work.path().join("comic.cbz")).unwrap();
+        let files: Vec<_> = names.iter().map(|n| (n.to_string(), fs::read(pages.join(n)).unwrap())).collect();
+        sheet::write_zip(&mut cbz, &files).unwrap();
+        for comic in ["comic.cbz", "comic.cbt"] {
+            let src = work.path().join(comic);
+            let pdf = convert(&src, "pdf", None, work.path()).unwrap_or_else(|e| panic!("{comic}: {e}"));
+            let count = Mutool { path: tool("mutool").unwrap(), src: &pdf, deadline: Instant::now() + PDF_TOTAL }.page_count(work.path()).unwrap();
+            assert_eq!(count, 3, "{comic}");
+            fs::remove_file(&pdf).unwrap();
+            let folder = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!("{comic}: {e}"));
+            assert_eq!(fs::read_dir(&folder).unwrap().count(), 3, "{comic}");
+            fs::remove_dir_all(&folder).unwrap();
+        }
+        // A TAR that isn't one: refused before MuPDF sees it.
+        fs::write(work.path().join("fake.cbt"), b"not a tar").unwrap();
+        assert_eq!(convert(&work.path().join("fake.cbt"), "pdf", None, work.path()).unwrap_err(), "this is not a valid .cbt file");
     }
 
     #[cfg(target_os = "macos")]

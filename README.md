@@ -32,6 +32,7 @@ This is our own build, written from scratch.
 | Spreadsheets: XLSX, XLS, ODS, CSV, TSV, Numbers; also XLSM, XLTX, XLT, OTS, flat ODF (FODS), TAB | PDF, XLSX, ODS, CSV, TSV (first sheet) | LibreOffice |
 | Presentations: PPTX, PPT, ODP, Keynote; also PPTM, POTX, POTM, shows (PPSX, PPS), POT, OTP, flat ODF (FODP) | PDF, PPTX, ODP, JPG, PNG (a picture of each slide) | LibreOffice; MuPDF for the pictures |
 | PDF | JPG, PNG (a picture of each page), SVG (each page as vector shapes), TXT, DOCX, Markdown, EPUB (the text only), PPTX (a slide with a picture of each page), XLSX (each page's text in rows and columns, a sheet per page), Pages (the text, macOS) | MuPDF (`mutool`); pandoc for DOCX, Markdown, EPUB and PPTX; the app itself writes the XLSX |
+| Comics: CBZ, CBT (read only) | PDF, JPG, PNG (a picture of each page) | MuPDF |
 | Subtitles: SRT, VTT; also SubStation (ASS, SSA), SAMI (SMI), lyrics (LRC), MicroDVD and SubViewer (SUB), TV captions (SCC) | SRT, VTT, TXT (only the words) | ffmpeg; the app itself for TXT |
 | Drawings: Visio (VSD, VSDX), CorelDraw (CDR), Publisher (PUB), Windows metafiles (EMF, WMF), ODF drawings (ODG, FODG), CGM, DXF | PDF, SVG (as shapes), PNG, JPG (a picture of each page) | LibreOffice Draw; MuPDF for the pictures |
 

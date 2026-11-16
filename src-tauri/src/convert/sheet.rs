@@ -461,8 +461,9 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// A ZIP file of `files` (name, bytes), each compressed with deflate.
-fn write_zip(out: &mut impl Write, files: &[(String, Vec<u8>)]) -> io::Result<()> {
+/// A ZIP file of `files` (name, bytes), each compressed with deflate. Also used by the
+/// comic tests (convert.rs) to make a CBZ.
+pub(crate) fn write_zip(out: &mut impl Write, files: &[(String, Vec<u8>)]) -> io::Result<()> {
     use flate2::write::DeflateEncoder;
     use flate2::{Compression, Crc};
     // 1980-01-01 00:00, the earliest time ZIP can say.
