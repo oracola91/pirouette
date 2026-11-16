@@ -168,6 +168,16 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
         return Err(format!("this is not a valid .{ext} file"));
     }
 
+    // JPEG 2000, JPEG XL, OpenEXR and icons on a Mac: the system decodes them to a TIFF
+    // first, converted from then on as that.
+    let (input, ext) = match (tool, kind) {
+        (None, Kind::Image) => match system_decoded(&input, work.path()).map_err(|e| redact(&e, src, work.path()))? {
+            Some(tiff) => (tiff, "tiff".to_string()),
+            None => (input, ext),
+        },
+        _ => (input, ext),
+    };
+
     let file = |done: Result<(), String>| done.map(|()| Output::File);
     let converted = match (tool, kind) {
         (Some("tool:qr"), Kind::Image) => file(read_qr(&input, &out, work.path())),
@@ -318,9 +328,189 @@ fn sniff_image(head: &[u8]) -> Option<&'static str> {
             b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some("heic"),
             _ => None,
         }
+    } else if at(0, b"8BPS\0\x01") {
+        Some("psd")
+    } else if at(0, b"8BPS\0\x02") {
+        Some("psb")
+    } else if at(0, b"\x8aMNG\r\n\x1a\n") {
+        Some("mng")
+    } else if at(0, b"qoif") {
+        Some("qoi")
+    } else if at(0, b"DDS ") {
+        Some("dds")
+    } else if at(0, b"/* XPM */") {
+        Some("xpm")
+    } else if at(0, &[0x59, 0xA6, 0x6A, 0x95]) {
+        Some("sun")
+    } else if at(0, &[0x01, 0xDA]) && head.get(2).is_some_and(|b| *b <= 1) && head.get(3).is_some_and(|b| matches!(b, 1 | 2)) {
+        Some("sgi")
+    } else if at(0, b"id=ImageMagick") {
+        Some("miff")
+    } else if at(0, b"#?RADIANCE") || at(0, b"#?RGBE") {
+        Some("hdr")
+    } else if at(0, b"SIMPLE  =") {
+        Some("fits")
+    } else if at(0, b"gimp xcf ") {
+        Some("xcf")
+    } else if at(128, b"DICM") {
+        Some("dcm")
+    } else if at(0, &[0x76, 0x2F, 0x31, 0x01]) {
+        Some("exr")
+    } else if at(0, b"\0\0\0\x0cjP  \r\n\x87\n") {
+        Some("jp2")
+    } else if at(0, &[0xFF, 0x4F, 0xFF, 0x51]) {
+        Some("j2k")
+    } else if at(0, &[0xFF, 0x0A]) || at(0, b"\0\0\0\x0cJXL \r\n\x87\n") {
+        Some("jxl")
+    } else if at(0, b"icns") {
+        Some("icns")
+    } else if head.first() == Some(&b'P') && head.get(2).is_some_and(u8::is_ascii_whitespace) {
+        // Netpbm: P1 and P4 black and white, P2 and P5 grey, P3 and P6 colour, P7 any,
+        // PF and Pf floating point.
+        match head.get(1)? {
+            b'1' | b'4' => Some("pbm"),
+            b'2' | b'5' => Some("pgm"),
+            b'3' | b'6' => Some("ppm"),
+            b'7' => Some("pam"),
+            b'F' | b'f' => Some("pfm"),
+            _ => None,
+        }
     } else {
         None
     }
+}
+
+/// The first bytes the picture readers look at: enough for DICOM's mark at 128 and
+/// Photo CD's at 2048.
+const PICTURE_HEAD: u64 = 2056;
+
+/// The ImageMagick reader for a picture: from its first bytes (sniff_image), or, for the
+/// formats with no clear mark of their own, from the extension once the header fits it.
+/// Naming the reader keeps ImageMagick from picking one itself, so a file can't pass
+/// for a script-like format (SVG, PostScript, MSL).
+fn picture_coder(head: &[u8], ext: &str) -> Option<&'static str> {
+    if let Some(coder) = sniff_image(head) {
+        return Some(coder);
+    }
+    let at = |i: usize, sig: &[u8]| head.get(i..i + sig.len()) == Some(sig);
+    let byte = |i: usize| head.get(i).copied();
+    match ext {
+        // Targa: a colour map flag of 0 or 1 and a known image type.
+        "tga" if head.len() >= 18 && byte(1) <= Some(1) && matches!(byte(2), Some(1 | 2 | 3 | 9 | 10 | 11 | 32 | 33)) => Some("tga"),
+        // Wireless bitmap: type 0, header byte 0.
+        "wbmp" if at(0, &[0, 0]) => Some("wbmp"),
+        // PC Paintbrush: its mark, a known version and run-length flag.
+        "pcx" if byte(0) == Some(0x0A) && matches!(byte(1), Some(0 | 2 | 3 | 4 | 5)) && byte(2) <= Some(1) => Some("pcx"),
+        "ico" if at(0, &[0, 0, 1, 0]) => Some("ico"),
+        "cur" if at(0, &[0, 0, 2, 0]) => Some("cur"),
+        "xbm" if at(0, b"#define") => Some("xbm"),
+        "pcd" if at(2048, b"PCD_IPI") || at(0, b"PCD_OPA") => Some("pcd"),
+        _ => None,
+    }
+}
+
+/// Pictures macOS reads with its own decoder (sips, as Preview does), which ImageMagick
+/// often can't: built without their libraries, or with no reader at all (icons).
+#[cfg(target_os = "macos")]
+const SYSTEM_DECODED: &[&str] = &["jp2", "j2k", "jxl", "exr", "icns"];
+
+/// What ImageMagick needs to be built with to read these: their own libraries.
+#[cfg(not(target_os = "macos"))]
+const NEEDS_LIBRARY: &[(&str, &str)] = &[("jp2", "JPEG 2000"), ("j2k", "JPEG 2000"), ("jxl", "JPEG XL"), ("exr", "OpenEXR")];
+
+/// A picture macOS decodes itself, as a TIFF in the work folder; None for any other
+/// picture, which ImageMagick reads as it is.
+fn system_decoded(src: &Path, work: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let ext = formats::extension(src).unwrap_or_default();
+        let Some(coder) = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext) else {
+            return Ok(None);
+        };
+        if !SYSTEM_DECODED.contains(&coder) {
+            return Ok(None);
+        }
+        let tiff = work.join("decoded.tiff");
+        let mut cmd = Command::new("/usr/bin/sips");
+        cmd.args(["-s", "format", "tiff"]).arg(src).arg("--out").arg(&tiff);
+        run(cmd, QUICK)?;
+        if !tiff.is_file() {
+            return Err("macOS could not read this picture".into());
+        }
+        Ok(Some(tiff))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (src, work);
+        Ok(None)
+    }
+}
+
+/// How ImageMagick is told to read a picture: the reader and the frame, and what to do
+/// once read. GIMP files come as layers and are flattened; icons hold several sizes, of
+/// which the largest is taken; every frame is kept only for a multi-page or animated
+/// `target` from a format whose frames are pages or moments (a PSD's are its layers, a
+/// DDS's its smaller copies).
+fn picture_input(src: &Path, coder: &str, target: &str) -> Result<(String, Vec<&'static str>), String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some((_, name)) = NEEDS_LIBRARY.iter().find(|(c, _)| *c == coder) {
+        if !magick_has(coder) {
+            return Err(format!("this ImageMagick can't read {name}: it was built without its library"));
+        }
+    }
+    let path = src.display();
+    Ok(match coder {
+        "xcf" => (format!("xcf:{path}"), vec!["-background", "none", "-layers", "flatten"]),
+        "ico" | "cur" => (format!("{coder}:{path}[{}]", largest_frame(src, coder)), Vec::new()),
+        "jpeg" | "png" | "gif" | "webp" | "tiff" | "bmp" | "heic" | "avif" | "mng" if matches!(target, "pdf" | "tiff" | "gif") => {
+            (format!("{coder}:{path}"), Vec::new())
+        }
+        _ => (format!("{coder}:{path}[0]"), Vec::new()),
+    })
+}
+
+/// The largest picture in an icon file, by its place in the file (0 when it can't be told).
+fn largest_frame(src: &Path, coder: &str) -> usize {
+    let Ok(magick) = magick() else { return 0 };
+    let mut cmd = Command::new(magick);
+    cmd.args(IMAGE_LIMITS).arg("-ping").arg(format!("{coder}:{}", src.display())).args(["-format", "%p %w %h\n", "info:"]);
+    cmd.stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    let Ok(out) = cmd.output() else { return 0 };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace().map(|n| n.parse::<u64>().ok());
+            Some((w.next()??, w.next()?? * w.next()??))
+        })
+        .max_by_key(|(_, area)| *area)
+        .map_or(0, |(i, _)| usize::try_from(i).unwrap_or(0))
+}
+
+/// Whether this ImageMagick has a reader for `coder`, from `magick -list format`.
+#[cfg(not(target_os = "macos"))]
+fn magick_has(coder: &str) -> bool {
+    let Ok(magick) = magick() else { return false };
+    let mut cmd = Command::new(magick);
+    cmd.args(["-list", "format"]).stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    cmd.output().is_ok_and(|out| {
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+            let mut w = l.split_whitespace();
+            let name = w.next().unwrap_or("").trim_end_matches('*');
+            // "JP2* JP2 rw-": the mode's first letter says it reads.
+            name.eq_ignore_ascii_case(coder) && w.nth(1).is_some_and(|mode| mode.starts_with('r'))
+        })
+    })
+}
+
+/// The first `n` bytes of a file (fewer if it is shorter).
+fn read_start(path: &Path, n: u64) -> Result<Vec<u8>, String> {
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .and_then(|f| f.take(n).read_to_end(&mut head))
+        .map_err(|e| format!("can't read the file: {e}"))?;
+    Ok(head)
 }
 
 /// Whether the start of a file fits its camera RAW extension: most are TIFF inside,
@@ -393,12 +583,12 @@ fn delegates_have_raw(version: &str) -> bool {
 fn image(src: &Path, target: &str, out: &Path) -> Result<(), String> {
     // Naming the real input format stops ImageMagick from picking a decoder itself.
     // The real format, not the extension, so a PNG saved as .jpg still converts.
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
-    // Multi-page outputs keep every frame; the rest take the first one.
-    let frame = if matches!(target, "pdf" | "tiff" | "gif") { "" } else { "[0]" };
+    let ext = formats::extension(src).unwrap_or_default();
+    let coder = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext).ok_or("this is not an image format the wheel can read")?;
+    let (input, after) = picture_input(src, coder, target)?;
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
-    cmd.arg(format!("{coder}:{}{frame}", src.display())).arg("-auto-orient");
+    cmd.arg(input).args(after).arg("-auto-orient");
     cmd.args(image_options(target, quality().pictures));
     cmd.arg(format!("{}:{}", out_coder(target), out.display()));
     run(cmd, QUICK).map_err(|e| {
@@ -414,13 +604,16 @@ fn image(src: &Path, target: &str, out: &Path) -> Result<(), String> {
 /// its style's longest side (2000 px, photos 1200), then this program traces them in a process of
 /// its own (svg.rs), under the usual time limit and Stop Converting.
 fn to_svg(src: &Path, out: &Path, work: &Path) -> Result<(), String> {
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
+    let ext = formats::extension(src).unwrap_or_default();
+    let coder = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext).ok_or("this is not an image format the wheel can read")?;
+    let (input, after) = picture_input(src, coder, "svg")?;
     let pixels = work.join("pixels.pam");
     let style = svg::Style::of_coder(coder);
     let side = style.max_side().to_string();
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
-    cmd.arg(format!("{coder}:{}[0]", src.display()))
+    cmd.arg(input)
+        .args(after)
         .args(["-auto-orient", "-resize", &format!("{side}x{side}>"), "-depth", "8"])
         .arg(format!("pam:{}", pixels.display()));
     run(cmd, QUICK)?;
@@ -4327,6 +4520,13 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Pages in a PDF ImageMagick wrote: its "/Type /Page" objects.
+    fn pdf_pages(path: &Path) -> usize {
+        let pdf = fs::read(path).unwrap();
+        pdf.windows(11).filter(|w| *w == b"/Type /Page").count()
+            - pdf.windows(12).filter(|w| *w == b"/Type /Pages").count()
+    }
+
     fn picture_size(path: &Path) -> String {
         let out = Command::new(magick().unwrap()).arg(path).args(["-format", "%wx%h", "info:"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -5459,6 +5659,210 @@ mod tests {
         assert!(delegates_have_raw("Version: ImageMagick 7.1.2\nDelegates (built-in): bzlib heic jpeg lcms png raw tiff webp zlib\n"));
         assert!(!delegates_have_raw("Delegates (built-in): bzlib heic jpeg png tiff\n"));
         assert!(!delegates_have_raw("Delegates (built-in): bzlib rawish\n"));
+    }
+
+    /// Every picture format the Other pictures row reads, made by ImageMagick (or, on a
+    /// Mac, by the system for those it decodes), comes out as a PNG of the same size.
+    #[test]
+    fn other_pictures_convert() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: other pictures not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let made = work.path().join("made.png");
+        let mut make = Command::new(magick().unwrap());
+        make.args(["-size", "40x30", "gradient:red-blue"]).arg(&made);
+        assert!(make.status().unwrap().success());
+        // (extension, ImageMagick writer, size it comes back at)
+        let cases = [
+            ("psd", "psd", "40x30"), ("psb", "psb", "40x30"), ("tga", "tga", "40x30"), ("ppm", "ppm", "40x30"),
+            ("pgm", "pgm", "40x30"), ("pbm", "pbm", "40x30"), ("pnm", "pnm", "40x30"), ("pam", "pam", "40x30"),
+            ("pfm", "pfm", "40x30"), ("apng", "png", "40x30"), ("mng", "mng", "40x30"), ("qoi", "qoi", "40x30"),
+            ("dds", "dds", "40x30"), ("pcx", "pcx", "40x30"), ("xpm", "xpm", "40x30"), ("xbm", "xbm", "40x30"),
+            ("wbmp", "wbmp", "40x30"), ("sgi", "sgi", "40x30"), ("rgb", "sgi", "40x30"), ("ras", "sun", "40x30"),
+            ("sun", "sun", "40x30"), ("miff", "miff", "40x30"), ("hdr", "hdr", "40x30"), ("fits", "fits", "40x30"),
+            ("ico", "ico", "40x30"), ("jfif", "jpeg", "40x30"), ("dib", "bmp", "40x30"),
+        ];
+        let mut tested = Vec::new();
+        for (ext, coder, size) in cases {
+            let src = work.path().join(format!("picture {ext}.{ext}"));
+            let mut write = Command::new(magick().unwrap());
+            write.arg(&made).arg(format!("{coder}:{}", src.display()));
+            if !write.status().unwrap().success() {
+                eprintln!("this ImageMagick can't write {coder}: .{ext} not tested");
+                continue;
+            }
+            let png = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(picture_size(&png), size, ".{ext}");
+            tested.push(ext);
+        }
+        // An icon with three sizes: the largest is taken.
+        let icon = work.path().join("sizes.ico");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).args(["-define", "icon:auto-resize=16,64,32"]).arg(format!("ico:{}", icon.display()));
+        assert!(write.status().unwrap().success());
+        assert_eq!(picture_size(&convert(&icon, "png", None, work.path()).unwrap()), "64x64");
+        // A cursor is an icon file with another mark.
+        let mut cur = fs::read(&icon).unwrap();
+        cur[2] = 2;
+        fs::write(work.path().join("pointer.cur"), &cur).unwrap();
+        assert_eq!(picture_size(&convert(&work.path().join("pointer.cur"), "png", None, work.path()).unwrap()), "64x64");
+        // A PSD's layers are not pages: one picture, even into a PDF.
+        let layered = work.path().join("layers.psd");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).args(["(", "-clone", "0", ")", "(", "-clone", "0", ")"]).arg(format!("psd:{}", layered.display()));
+        assert!(write.status().unwrap().success());
+        let pdf = convert(&layered, "pdf", None, work.path()).unwrap();
+        assert_eq!(pdf_pages(&pdf), 1);
+        // Photo CD: ImageMagick writes its fixed sizes; the first, 192x128, is read.
+        let pcd = work.path().join("scan.pcd");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).arg(format!("pcd:{}", pcd.display()));
+        if write.status().unwrap().success() {
+            assert_eq!(picture_size(&convert(&pcd, "png", None, work.path()).unwrap()), "192x128");
+            tested.push("pcd");
+        }
+        // DICOM and GIMP files, which ImageMagick reads but doesn't write: built here.
+        fs::write(work.path().join("scan.dcm"), dicom_grey(40, 30)).unwrap();
+        let png = convert(&work.path().join("scan.dcm"), "png", None, work.path()).unwrap();
+        assert_eq!(picture_size(&png), "40x30");
+        fs::write(work.path().join("art.xcf"), gimp_rgb(40, 30)).unwrap();
+        let png = convert(&work.path().join("art.xcf"), "jpg", None, work.path()).unwrap();
+        assert_eq!(picture_size(&png), "40x30");
+        eprintln!("other pictures tested: {} dcm xcf", tested.join(" "));
+        assert!(tested.len() >= 20, "{tested:?}");
+    }
+
+    /// A small grey DICOM file: preamble, DICM, file meta with the transfer syntax
+    /// (explicit VR, little endian), then the picture's size and pixels.
+    fn dicom_grey(w: u16, h: u16) -> Vec<u8> {
+        fn el(group: u16, elem: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+            let mut e = [group.to_le_bytes(), elem.to_le_bytes()].concat();
+            e.extend(vr);
+            if vr == b"OB" {
+                e.extend([0, 0]);
+                e.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+            } else {
+                e.extend(u16::try_from(value.len()).unwrap().to_le_bytes());
+            }
+            e.extend(value);
+            e
+        }
+        let meta = el(0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
+        let mut file = vec![0u8; 128];
+        file.extend(b"DICM");
+        file.extend(el(0x0002, 0x0000, b"UL", &u32::try_from(meta.len()).unwrap().to_le_bytes()));
+        file.extend(meta);
+        for (elem, value) in [(0x0002, 1u16), (0x0010, h), (0x0011, w), (0x0100, 8), (0x0101, 8), (0x0102, 7), (0x0103, 0)] {
+            if elem == 0x0010 {
+                file.extend(el(0x0028, 0x0004, b"CS", b"MONOCHROME2 "));
+            }
+            file.extend(el(0x0028, elem, b"US", &value.to_le_bytes()));
+        }
+        let pixels: Vec<u8> = (0..h).flat_map(|_| (0..w).map(|x| (x * 6 % 256) as u8)).collect();
+        file.extend(el(0x7FE0, 0x0010, b"OB", &pixels));
+        file
+    }
+
+    /// A small GIMP file (version 0): one visible RGB layer, its one tile uncompressed.
+    /// ImageMagick reads a last tile as up to 64 x 64 x 4 x 1.5 bytes, so the file runs on.
+    fn gimp_rgb(w: u32, h: u32) -> Vec<u8> {
+        let be = |n: u32| n.to_be_bytes().to_vec();
+        let mut file = b"gimp xcf file\0".to_vec();
+        for n in [w, h, 0, 0, 0] {
+            file.extend(be(n));
+        }
+        let layer_at = u32::try_from(file.len()).unwrap() + 12;
+        file.extend([be(layer_at), be(0), be(0)].concat());
+        // Size, RGB, name, then opacity 255 and visible, as GIMP writes them.
+        for n in [w, h, 0, 6] {
+            file.extend(be(n));
+        }
+        file.extend(b"Layer\0");
+        for n in [6, 4, 255, 8, 4, 1, 0, 0] {
+            file.extend(be(n));
+        }
+        let hierarchy_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(hierarchy_at), be(0), be(w), be(h), be(3)].concat());
+        let level_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(level_at), be(0), be(w), be(h)].concat());
+        let tile_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(tile_at), be(0)].concat());
+        for y in 0..h {
+            for x in 0..w {
+                file.extend([(x * 6 % 256) as u8, (y * 8 % 256) as u8, 128]);
+            }
+        }
+        file.extend(vec![0u8; 40_000]);
+        file
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_decodes_jpeg_2000_openexr_and_icons() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: system-decoded pictures not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let made = work.path().join("made.png");
+        let mut make = Command::new(magick().unwrap());
+        // 128 px: the least sips writes an icon file from.
+        make.args(["-size", "128x128", "gradient:red-blue"]).arg(&made);
+        assert!(make.status().unwrap().success());
+        // A bare JPEG 2000 codestream, from ffmpeg's own encoder when it is here.
+        if let Ok(ffmpeg) = tool("ffmpeg") {
+            let j2k = work.path().join("picture.j2k");
+            let mut make = Command::new(ffmpeg);
+            make.args(["-v", "error", "-i"]).arg(&made).args(["-c:v", "jpeg2000", "-format", "j2k", "-f", "image2"]).arg(&j2k);
+            if make.status().unwrap().success() {
+                assert_eq!(&fs::read(&j2k).unwrap()[..4], [0xFF, 0x4F, 0xFF, 0x51]);
+                assert_eq!(picture_size(&convert(&j2k, "png", None, work.path()).unwrap()), "128x128");
+            }
+        }
+        for (ext, uti) in [("jp2", "public.jpeg-2000"), ("exr", "com.ilm.openexr-image"), ("icns", "com.apple.icns")] {
+            let src = work.path().join(format!("picture.{ext}"));
+            let mut sips = Command::new("/usr/bin/sips");
+            sips.args(["-s", "format", uti]).arg(&made).arg("--out").arg(&src).stdout(Stdio::null());
+            assert!(sips.status().unwrap().success(), "sips can't write .{ext}");
+            let png = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(picture_size(&png), "128x128", ".{ext}");
+        }
+    }
+
+    #[test]
+    fn pictures_are_read_by_their_marks() {
+        let mut dcm = vec![0u8; 132];
+        dcm[128..].copy_from_slice(b"DICM");
+        for (head, ext, coder) in [
+            (b"8BPS\0\x01\0\0".to_vec(), "psd", Some("psd")),
+            (b"8BPS\0\x02\0\0".to_vec(), "psb", Some("psb")),
+            (b"qoif\0\0".to_vec(), "qoi", Some("qoi")),
+            (b"P6\n40 30\n".to_vec(), "ppm", Some("ppm")),
+            (b"P4 1 1\n".to_vec(), "pbm", Some("pbm")),
+            (b"Pf\n1 1\n".to_vec(), "pfm", Some("pfm")),
+            (b"P9\n".to_vec(), "ppm", None),
+            (dcm, "dcm", Some("dcm")),
+            (b"gimp xcf v011\0".to_vec(), "xcf", Some("xcf")),
+            (b"\0\0\0\x0cjP  \r\n\x87\n".to_vec(), "jp2", Some("jp2")),
+            (vec![0xFF, 0x0A, 0, 0], "jxl", Some("jxl")),
+            // No mark of their own: right only under their own name.
+            (vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 30, 0, 24, 0], "tga", Some("tga")),
+            (vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 30, 0, 24, 0], "cur", Some("cur")),
+            (vec![0, 0, 1, 0, 1, 0], "tga", None),
+            (vec![0, 0, 1, 0, 1, 0], "ico", Some("ico")),
+            (vec![0x0A, 5, 1, 8], "pcx", Some("pcx")),
+            (vec![0x0A, 9, 1, 8], "pcx", None),
+            (b"#define a_width 1\n".to_vec(), "xbm", Some("xbm")),
+            (b"#define a_width 1\n".to_vec(), "h", None),
+            // A script-like file never gets a reader.
+            (b"<svg xmlns=".to_vec(), "tga", None),
+            (b"%!PS-Adobe-3.0".to_vec(), "pcx", None),
+            (b"push graphic-context".to_vec(), "wbmp", None),
+        ] {
+            assert_eq!(picture_coder(&head, ext), coder, ".{ext} {head:?}");
+        }
     }
 
     /// macOS decodes camera RAW itself (sips). A TIFF named .dng stands in for one:

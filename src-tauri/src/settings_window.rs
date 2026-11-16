@@ -50,6 +50,8 @@ struct FormatView {
 #[derive(Serialize)]
 struct KindView {
     label: &'static str,
+    /// What the row is for, when its name doesn't say.
+    note: Option<&'static str>,
     formats: Vec<FormatView>,
 }
 
@@ -170,12 +172,17 @@ fn hold_here() -> bool {
 fn view(app: &AppHandle) -> View {
     let s = app.state::<Store>().get();
     let terminals = crate::terminal::installed();
-    let kinds = formats::all()
-        .map(|(kind, outputs)| KindView {
-            label: kind.label(),
-            formats: outputs
+    let kinds = formats::rows()
+        .map(|row| KindView {
+            label: row.label,
+            note: (row.key == formats::MORE_ROW).then_some(
+                "PSD, TGA, JPEG XL, JPEG 2000, OpenEXR and other pictures the wheel reads but doesn't write. \
+                 More formats on than the wheel size shows come in a second set, with More.",
+            ),
+            formats: row
+                .outputs
                 .iter()
-                .map(|f| FormatView { key: settings::key(kind, f), label: f.to_uppercase(), shown: s.shows(kind, f) })
+                .map(|f| FormatView { key: settings::key(row.key, f), label: f.to_uppercase(), shown: s.shows(row.key, f) })
                 .collect(),
         })
         .collect();
@@ -220,9 +227,9 @@ fn view(app: &AppHandle) -> View {
     }
 }
 
-/// A format key the wheel really has, such as "image:avif".
-fn known_format(key: &str) -> bool {
-    formats::all().any(|(kind, outputs)| outputs.iter().any(|f| settings::key(kind, f) == key))
+/// The Settings row and format a key names, such as "image:avif", if the wheel has it.
+fn known_format(key: &str) -> Option<(&'static str, &'static str)> {
+    formats::rows().find_map(|row| row.outputs.iter().find(|f| settings::key(row.key, f) == key).map(|f| (row.key, *f)))
 }
 
 /// What a change does to the saved settings.
@@ -241,17 +248,9 @@ fn edit(change: &Change) -> Result<Edit, String> {
             Box::new(move |s| s.shelf_off = off)
         }
         Change::Format { key, shown } => {
-            if !known_format(key) {
-                return Err(format!("no format {key} on the wheel"));
-            }
-            let (key, shown) = (key.clone(), *shown);
-            Box::new(move |s| {
-                if shown {
-                    s.hidden.remove(&key);
-                } else {
-                    s.hidden.insert(key);
-                }
-            })
+            let (row, format) = known_format(key).ok_or_else(|| format!("no format {key} on the wheel"))?;
+            let shown = *shown;
+            Box::new(move |s| s.show(row, format, shown))
         }
         Change::Keys { wheel, combo } => {
             let which = WHEELS.iter().find(|w| w.1 == wheel).map(|w| w.0).ok_or_else(|| format!("no wheel {wheel}"))?;
@@ -494,7 +493,16 @@ mod tests {
     }
 
     #[test]
+    fn bmp_comes_on_for_other_pictures() {
+        let on = changed(Change::Format { key: "image-more:bmp".into(), shown: true });
+        assert!(on.shown.contains("image-more:bmp") && on.hidden.is_empty());
+        let off = changed(Change::Format { key: "image-more:webp".into(), shown: false });
+        assert!(off.hidden.contains("image-more:webp"));
+    }
+
+    #[test]
     fn unknown_names_are_refused() {
+        assert!(edit(&Change::Format { key: "image-more:mp3".into(), shown: true }).is_err());
         assert!(edit(&Change::Format { key: "image:exe".into(), shown: false }).is_err());
         assert!(edit(&Change::Keys { wheel: "nope".into(), combo: None }).is_err());
         assert!(edit(&Change::Keys { wheel: "tools".into(), combo: Some("shift-cmd".into()) }).is_err());

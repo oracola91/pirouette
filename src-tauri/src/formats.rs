@@ -55,6 +55,33 @@ const PDF_OUT: &[&str] = &["docx", "jpg", "png", "txt", "svg", "md", "epub", "pp
 #[cfg(not(target_os = "macos"))]
 const PDF_OUT: &[&str] = &["docx", "jpg", "png", "txt", "svg", "md", "epub", "pptx", "xlsx"];
 
+/// What pictures can be turned into.
+const IMAGE_OUT: &[&str] = &["jpg", "png", "heic", "webp", "tiff", "gif", "avif", "bmp", "ico", "pdf", "svg"];
+
+/// Pictures the wheel reads but never writes: design, game, scientific and older
+/// formats, read by ImageMagick (macOS: JPEG 2000, JPEG XL, OpenEXR and icons by the
+/// system's own decoder). They have a Settings row of their own, "Other pictures":
+/// with no format of their own to leave out they would offer all eleven picture
+/// formats, one more than a wheel shows at once, so BMP starts off there (MORE_OFF) and
+/// the user can turn it on (a second set, with More) or swap it for another.
+#[cfg(target_os = "macos")]
+pub const MORE_PICTURES: &[&str] = &[
+    "psd", "psb", "tga", "ppm", "pgm", "pbm", "pnm", "pam", "pfm", "apng", "mng", "qoi", "dds", "pcx", "cur", "xpm", "xbm",
+    "wbmp", "sgi", "rgb", "rgba", "bw", "ras", "sun", "miff", "dcm", "dicom", "pcd", "hdr", "fits", "fts", "xcf", "jp2",
+    "j2k", "jpf", "jpx", "exr", "jxl", "icns",
+];
+/// Windows and Linux have no reader for Apple's icon files.
+#[cfg(not(target_os = "macos"))]
+pub const MORE_PICTURES: &[&str] = &[
+    "psd", "psb", "tga", "ppm", "pgm", "pbm", "pnm", "pam", "pfm", "apng", "mng", "qoi", "dds", "pcx", "cur", "xpm", "xbm",
+    "wbmp", "sgi", "rgb", "rgba", "bw", "ras", "sun", "miff", "dcm", "dicom", "pcd", "hdr", "fits", "fts", "xcf", "jp2",
+    "j2k", "jpf", "jpx", "exr", "jxl",
+];
+
+/// The Settings row for MORE_PICTURES, and the formats it starts without.
+pub const MORE_ROW: &str = "image-more";
+const MORE_OFF: &[&str] = &["bmp"];
+
 /// What each kind of file is read from and can be turned into.
 const KINDS: &[(Kind, &[&str], &[&str])] = &[
     (
@@ -62,10 +89,10 @@ const KINDS: &[(Kind, &[&str], &[&str])] = &[
         // Camera RAW (RAW, at the end) is read only: macOS's own decoder, or an
         // ImageMagick built with LibRaw (convert.rs, raw_to_tiff).
         &[
-            "jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "bmp", "gif", "avif", "svg", "dng", "cr2", "cr3", "nef",
-            "nrw", "arw", "orf", "rw2", "raf", "pef", "srw",
+            "jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "bmp", "gif", "avif", "svg", "ico", "jpe", "jfif",
+            "jif", "hif", "dib", "dng", "cr2", "cr3", "nef", "nrw", "arw", "orf", "rw2", "raf", "pef", "srw",
         ],
-        &["jpg", "png", "heic", "webp", "tiff", "gif", "avif", "bmp", "ico", "pdf", "svg"],
+        IMAGE_OUT,
     ),
     (
         Kind::Audio,
@@ -314,11 +341,6 @@ pub fn actions_for(paths: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
-/// Every kind with the formats it can become, in menu order.
-pub fn all() -> impl Iterator<Item = (Kind, &'static [&'static str])> {
-    KINDS.iter().map(|(kind, _, outs)| (*kind, *outs))
-}
-
 /// Most segments the wheel draws unless Settings says otherwise (Wheel > Wheel size), so
 /// labels stay readable. A wheel with more to offer shows them a set at a time, with More
 /// last (wheel::page_of).
@@ -337,12 +359,18 @@ pub fn extension(path: &Path) -> Option<String> {
 }
 
 pub fn kind_of(ext: &str) -> Option<Kind> {
+    if MORE_PICTURES.contains(&ext) {
+        return Some(Kind::Image);
+    }
     KINDS.iter().find(|(_, ins, _)| ins.contains(&ext)).map(|(k, _, _)| *k)
 }
 
 pub fn outputs_for(ext: &str) -> &'static [&'static str] {
     if is_raw(ext) {
         return RAW_OUTPUTS;
+    }
+    if MORE_PICTURES.contains(&ext) {
+        return IMAGE_OUT;
     }
     KINDS
         .iter()
@@ -354,9 +382,10 @@ pub fn outputs_for(ext: &str) -> &'static [&'static str] {
 /// Same name for the same format, so "jpeg" in and "jpg" out don't both show.
 pub fn canonical(ext: &str) -> &str {
     match ext {
-        "jpeg" => "jpg",
+        "jpeg" | "jpe" | "jfif" | "jif" => "jpg",
         "tif" => "tiff",
-        "heif" => "heic",
+        "heif" | "hif" => "heic",
+        "dib" => "bmp",
         "aif" => "aiff",
         "htm" => "html",
         "markdown" => "md",
@@ -364,9 +393,39 @@ pub fn canonical(ext: &str) -> &str {
     }
 }
 
-/// Formats every dragged file can be turned into and the user has left on the wheel,
-/// minus the format they already have when they all share one.
-pub fn formats_for(paths: &[String], shows: impl Fn(Kind, &str) -> bool) -> Vec<&'static str> {
+/// A row of Settings > Wheel > Formats on the wheel: the formats one group of files can
+/// become, each of which the user can leave off the wheel. `key` is how the settings
+/// file names it ("image", "image-more"); `off` are formats it starts without.
+pub struct Row {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub outputs: &'static [&'static str],
+    pub off: &'static [&'static str],
+}
+
+/// Every row, in Settings order: one per kind, with Other pictures after Pictures.
+pub fn rows() -> impl Iterator<Item = Row> {
+    KINDS.iter().flat_map(|(kind, _, outs)| {
+        let row = Row { key: kind.key(), label: kind.label(), outputs: outs, off: &[] };
+        let more = (*kind == Kind::Image).then_some(Row { key: MORE_ROW, label: "Other pictures", outputs: IMAGE_OUT, off: MORE_OFF });
+        std::iter::once(row).chain(more)
+    })
+}
+
+/// The Settings row whose choices count for .`ext` files. Camera RAW follows Pictures.
+pub fn row_of(ext: &str) -> Option<&'static str> {
+    if MORE_PICTURES.contains(&ext) { Some(MORE_ROW) } else { kind_of(ext).map(Kind::key) }
+}
+
+/// Whether `format` starts off the wheel in `row` until the user turns it on.
+pub fn off_unless_chosen(row: &str, format: &str) -> bool {
+    rows().any(|r| r.key == row && r.off.contains(&format))
+}
+
+/// Formats every dragged file can be turned into and the user has left on the wheel
+/// (`shows`, by Settings row and format), minus the format they already have when they
+/// all share one.
+pub fn formats_for(paths: &[String], shows: impl Fn(&str, &str) -> bool) -> Vec<&'static str> {
     let exts: Vec<String> = paths.iter().filter_map(|p| extension(Path::new(p))).collect();
     if exts.is_empty() || exts.len() != paths.len() {
         return Vec::new();
@@ -374,8 +433,8 @@ pub fn formats_for(paths: &[String], shows: impl Fn(Kind, &str) -> bool) -> Vec<
     let mut common: Vec<&'static str> = outputs_for(&exts[0]).to_vec();
     for ext in &exts {
         let outs = outputs_for(ext);
-        let kind = kind_of(ext);
-        common.retain(|f| outs.contains(f) && kind.is_some_and(|k| shows(k, f)));
+        let row = row_of(ext);
+        common.retain(|f| outs.contains(f) && row.is_some_and(|r| shows(r, f)));
     }
     let first = canonical(&exts[0]);
     if exts.iter().all(|e| canonical(e) == first) {
@@ -392,17 +451,60 @@ mod tests {
         paths.iter().map(|p| p.to_string()).collect()
     }
 
-    fn all_shown(_: Kind, _: &str) -> bool {
+    fn all_shown(_: &str, _: &str) -> bool {
         true
     }
 
     #[test]
     fn hidden_formats_leave_the_wheel() {
-        let f = formats_for(&v(&["/tmp/a.png"]), |k, f| !(k == Kind::Image && f == "avif"));
+        let f = formats_for(&v(&["/tmp/a.png"]), |r, f| !(r == "image" && f == "avif"));
         assert!(!f.contains(&"avif") && f.contains(&"jpg"));
         // hiding PDF for documents only still leaves it for spreadsheets
-        let f = formats_for(&v(&["/tmp/a.xlsx"]), |k, f| !(k == Kind::Doc && f == "pdf"));
+        let f = formats_for(&v(&["/tmp/a.xlsx"]), |r, f| !(r == "doc" && f == "pdf"));
         assert!(f.contains(&"pdf"));
+    }
+
+    /// As Settings starts: every format on, except those a row starts without.
+    fn as_installed(row: &str, f: &str) -> bool {
+        !off_unless_chosen(row, f)
+    }
+
+    #[test]
+    fn other_pictures_fit_one_wheel_until_bmp_is_turned_on() {
+        for ext in MORE_PICTURES {
+            assert_eq!(kind_of(ext), Some(Kind::Image), ".{ext}");
+            assert_eq!(row_of(ext), Some(MORE_ROW), ".{ext}");
+            let f = formats_for(&[format!("/tmp/a.{ext}")], as_installed);
+            assert_eq!(f.len(), MAX_SEGMENTS, ".{ext}: {f:?}");
+            assert!(!f.contains(&"bmp"), ".{ext}");
+            // Turned on in Settings: eleven, which come in two sets with More.
+            assert_eq!(formats_for(&[format!("/tmp/a.{ext}")], all_shown).len(), MAX_SEGMENTS + 1, ".{ext}");
+            // Never a Pictures input as well: one row each.
+            assert!(!KINDS.iter().any(|(_, ins, _)| ins.contains(ext)), ".{ext}");
+        }
+        // BMP stays on for the pictures the wheel also writes.
+        assert!(formats_for(&v(&["/tmp/a.png"]), as_installed).contains(&"bmp"));
+        // Turning a format off in Other pictures leaves Pictures alone.
+        let f = formats_for(&v(&["/tmp/a.png"]), |r, f| !(r == MORE_ROW && f == "webp"));
+        assert!(f.contains(&"webp"));
+        // A PSD with a JPG: both rows count, so BMP (off for the PSD) is left out.
+        assert!(!formats_for(&v(&["/tmp/a.psd", "/tmp/b.jpg"]), as_installed).contains(&"bmp"));
+    }
+
+    #[test]
+    fn picture_aliases_drop_their_own_format() {
+        for (ext, own) in [("jfif", "jpg"), ("jpe", "jpg"), ("jif", "jpg"), ("hif", "heic"), ("dib", "bmp"), ("ico", "ico")] {
+            let f = formats_for(&[format!("/tmp/a.{ext}")], all_shown);
+            assert!(!f.contains(&own), ".{ext}");
+            assert_eq!(f.len(), MAX_SEGMENTS, ".{ext}");
+        }
+    }
+
+    #[test]
+    fn rows_cover_every_kind_once() {
+        let keys: Vec<_> = rows().map(|r| r.key).collect();
+        assert_eq!(keys, ["image", MORE_ROW, "audio", "video", "doc", "sheet", "slides", "pdf", "subs"]);
+        assert!(rows().all(|r| r.off.iter().all(|f| r.outputs.contains(f))));
     }
 
     #[test]

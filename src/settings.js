@@ -243,7 +243,7 @@ function wheel(v) {
         { class: 'chips', role: 'group', 'aria-label': `${k.label} on the wheel` },
         k.formats.map((f) => h('label', {}, h('input', { type: 'checkbox', id: `format-${f.key}`, checked: f.shown, onchange: (e) => change({ what: 'format', key: f.key, shown: e.target.checked }) }), f.label)),
       ),
-      null,
+      k.note,
       true,
     ),
   );
