@@ -228,6 +228,11 @@ function wheel(v) {
     row('Highlight colour', swatches),
     row(mac ? 'Liquid Glass' : 'See-through', glass, mac ? 'Off: a plain solid wheel.' : 'Off: a solid wheel.'),
     row('Transparency', h('div', { class: 'ends' }, mac ? 'Frosted' : 'Less', slider, mac ? 'Clear' : 'More')),
+    row(
+      'Wheel size',
+      segments('wheel-size', v.wheel_sizes.map((n) => ({ key: String(n), label: String(n) })), String(v.wheel_size), (n) => change({ what: 'wheel-size', segments: Number(n) }), 'Segments on the wheel'),
+      'Most segments on the wheel at once. A wheel with more shows them a set at a time: rest on More for the next.',
+    ),
   );
 
   const kinds = v.kinds.map((k) =>

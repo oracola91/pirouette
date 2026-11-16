@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::formats::Kind;
+use crate::formats::{self, Kind};
 use crate::wheel::{lock, Which};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +123,27 @@ pub struct Settings {
     /// Hold to Convert: a file pressed and held still for a moment, then dragged,
     /// opens the Formats wheel without a key (for touch screens). Off unless chosen.
     pub hold_to_convert: bool,
+    /// Most segments a wheel shows at once (Settings > Wheel > Wheel size).
+    pub wheel_size: WheelSize,
+}
+
+/// How many segments a wheel shows at once: 8, 10 or 12 (formats::WHEEL_SIZES). Any
+/// other number in the file counts as the default, 10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WheelSize(pub u8);
+
+impl Default for WheelSize {
+    fn default() -> Self {
+        WheelSize(formats::MAX_SEGMENTS as u8)
+    }
+}
+
+impl WheelSize {
+    pub fn segments(self) -> usize {
+        let n = usize::from(self.0);
+        if formats::WHEEL_SIZES.contains(&n) { n } else { formats::MAX_SEGMENTS }
+    }
 }
 
 /// The keys held with Shift that open a wheel: Shift alone, with Option (Alt on Windows
@@ -542,5 +563,16 @@ mod tests {
         let store = Store { path, current: Mutex::new(Settings::default()), locked: false };
         assert!(store.update(|s| s.save_to = SaveTo::Downloads).is_err());
         assert_eq!(store.get().save_to, SaveTo::NextToOriginal);
+    }
+
+    #[test]
+    fn the_wheel_size_defaults_to_ten() {
+        let old: Settings = serde_json::from_str(r#"{"save_to":"downloads","hidden":[]}"#).unwrap();
+        assert_eq!(old.wheel_size.segments(), 10);
+        let set: Settings = serde_json::from_str(r#"{"wheel_size":12}"#).unwrap();
+        assert_eq!(set.wheel_size.segments(), 12);
+        // A hand-edited file with a size the wheel doesn't offer: the default.
+        let odd: Settings = serde_json::from_str(r#"{"wheel_size":3}"#).unwrap();
+        assert_eq!(odd.wheel_size.segments(), 10);
     }
 }

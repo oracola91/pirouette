@@ -319,9 +319,16 @@ pub fn all() -> impl Iterator<Item = (Kind, &'static [&'static str])> {
     KINDS.iter().map(|(kind, _, outs)| (*kind, *outs))
 }
 
-/// Most segments the wheel draws, so labels stay readable. A wheel with more to offer
-/// shows them a set at a time, with More last (wheel::page_of).
+/// Most segments the wheel draws unless Settings says otherwise (Wheel > Wheel size), so
+/// labels stay readable. A wheel with more to offer shows them a set at a time, with More
+/// last (wheel::page_of).
 pub const MAX_SEGMENTS: usize = 10;
+
+/// The wheel sizes Settings offers, in segments. MAX_SEGMENTS is the default.
+pub const WHEEL_SIZES: [usize; 3] = [8, MAX_SEGMENTS, 12];
+
+/// The most segments any wheel size draws.
+pub const MOST_SEGMENTS: usize = 12;
 
 pub fn extension(path: &Path) -> Option<String> {
     path.extension()
