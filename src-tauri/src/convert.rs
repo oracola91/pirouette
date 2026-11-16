@@ -160,16 +160,7 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
     // reader from the content: a broken .docx comes out as a PDF of its raw bytes, and
     // a web page saved as .doc is read as a web page.
     let head = read_head(&input)?;
-    let expected: &[u8] = match ext.as_str() {
-        // Pages, Numbers and Keynote save a ZIP file too (an older package folder is
-        // refused above, as not a regular file).
-        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pages" | "numbers" | "key" => b"PK",
-        "doc" | "xls" | "ppt" => &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
-        "rtf" => b"{\\rtf",
-        "pdf" => b"%PDF-",
-        _ => b"",
-    };
-    if !head.starts_with(expected) {
+    if !office_mark_fits(&head, &ext) {
         return Err(format!("this is not a valid .{ext} file"));
     }
 
@@ -388,6 +379,34 @@ fn sniff_image(head: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Whether a file starts the way its office (or PDF) extension says. Any start fits
+/// the formats with no such check.
+fn office_mark_fits(head: &[u8], ext: &str) -> bool {
+    const OLE: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let marks: &[&[u8]] = match ext {
+        // Pages, Numbers and Keynote save a ZIP file too (an older package folder is
+        // refused above, as not a regular file). So do the Office and ODF templates and
+        // macro files.
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pages" | "numbers" | "key" | "docm" | "dotx" | "dotm"
+        | "ott" | "xlsm" | "xltx" | "ots" | "pptm" | "potx" | "potm" | "ppsx" | "otp" => &[b"PK"],
+        // Office 97 to 2003, its templates and shows, Works 4 and later, StarWriter.
+        "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot" | "pps" | "wps" | "sdw" => &[OLE],
+        "rtf" => &[b"{\\rtf"],
+        "pdf" => &[b"%PDF-"],
+        // Flat ODF and AbiWord are XML (AbiWord's may start at its own tag); compressed
+        // AbiWord is gzip.
+        "fodt" | "fods" | "fodp" => &[b"<?xml"],
+        "abw" => &[b"<?xml", b"<abiword"],
+        "zabw" => &[&[0x1F, 0x8B]],
+        "wpd" => &[b"\xFFWPC"],
+        "psw" => &[b"{\\pwi"],
+        // Windows Write: 0x31 or 0x32, then 0xBE 0 0.
+        "wri" => &[&[0x31, 0xBE, 0, 0], &[0x32, 0xBE, 0, 0]],
+        _ => &[b""],
+    };
+    marks.iter().any(|m| head.starts_with(m))
 }
 
 /// The first bytes the picture readers look at: enough for DICOM's mark at 128 and
@@ -1482,7 +1501,7 @@ fn video(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> 
 /// files); pandoc is better at the plain formats (HTML, Markdown, text, EPUB).
 fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> Result<(), String> {
     let ext = formats::canonical(ext);
-    let office_in = matches!(ext, "docx" | "doc" | "odt" | "rtf" | "pages");
+    let office_in = matches!(ext, "docx" | "doc" | "odt" | "rtf" | "pages") || libreoffice_only(ext);
     match target {
         // A clipping's plain text to plain text, or an RTFD that is already Word: as it is.
         _ if ext == target => fs::copy(src, out).map(drop).map_err(|e| format!("work folder: {e}")),
@@ -1507,7 +1526,7 @@ fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> 
             pandoc(src, ext, "docx", &docx)?;
             libreoffice(&docx, target, out)
         }
-        _ if matches!(ext, "doc" | "rtf" | "pages") => {
+        _ if matches!(ext, "doc" | "rtf" | "pages") || libreoffice_only(ext) => {
             // pandoc can't read .doc or Pages, and reads RTF only in recent versions:
             // LibreOffice turns them into .docx first.
             let docx = work.path().join("intermediate.docx");
@@ -1518,9 +1537,21 @@ fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> 
     }
 }
 
+/// Word-processing files only LibreOffice reads: templates, macro files, flat ODF and
+/// older word processors. pandoc gets them as Word files from LibreOffice.
+fn libreoffice_only(ext: &str) -> bool {
+    matches!(ext, "docm" | "dotx" | "dotm" | "dot" | "ott" | "fodt" | "wpd" | "wps" | "abw" | "zabw" | "sdw" | "psw" | "wri")
+}
+
 fn pandoc(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> {
     let reader = match ext {
         "md" | "txt" => "markdown",
+        "tex" | "latex" => "latex",
+        "adoc" | "asciidoc" => "asciidoc",
+        "typ" => "typst",
+        "wiki" | "mediawiki" => "mediawiki",
+        "dbk" | "docbook" => "docbook",
+        "xhtml" => "html",
         other => other,
     };
     let writer = match target {
@@ -1546,6 +1577,8 @@ fn pandoc(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String>
             "this pandoc can't write that format in its sandbox (Ubuntu's and Debian's builds can't): \
              install pandoc from github.com/jgm/pandoc/releases"
                 .to_string()
+        } else if e.contains("Unknown input format") {
+            format!("this pandoc is too old to read .{ext} files: a newer one from github.com/jgm/pandoc/releases does")
         } else {
             e
         }
@@ -1564,8 +1597,21 @@ fn libreoffice(src: &Path, target: &str, out: &Path) -> Result<(), String> {
     harden_libreoffice(&profile)?;
     cmd.arg(format!("-env:UserInstallation={}", file_url(&profile)))
         .args(["--headless", "--norestore", "--nolockcheck"]);
-    // Text and CSV are read as exactly that, never sniffed as something richer.
+    // Text and CSV are read as exactly that, never sniffed as something richer; so are
+    // flat ODF and AbiWord, XML that could otherwise pass for a web page.
     match formats::extension(src).as_deref() {
+        Some("fodt") => {
+            cmd.arg("--infilter=OpenDocument Text Flat XML");
+        }
+        Some("fods") => {
+            cmd.arg("--infilter=OpenDocument Spreadsheet Flat XML");
+        }
+        Some("fodp") => {
+            cmd.arg("--infilter=OpenDocument Presentation Flat XML");
+        }
+        Some("abw" | "zabw") => {
+            cmd.arg("--infilter=AbiWord");
+        }
         Some("txt") => {
             cmd.arg("--infilter=Text (encoded):UTF8");
         }
@@ -1573,7 +1619,7 @@ fn libreoffice(src: &Path, target: &str, out: &Path) -> Result<(), String> {
             cmd.arg("--infilter=CSV:44,34,76,1");
         }
         // Tab-separated: the same reader with a tab (9) between the fields.
-        Some("tsv") => {
+        Some("tsv" | "tab") => {
             cmd.arg("--infilter=CSV:9,34,76,1");
         }
         _ => {}
@@ -5936,6 +5982,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn office_files_must_start_as_their_format() {
+        let ole = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        for ext in ["docm", "dotx", "xlsm", "potx", "ppsx", "otp"] {
+            assert!(office_mark_fits(b"PK\x03\x04", ext), "{ext}");
+            assert!(!office_mark_fits(b"<html>", ext), "{ext}");
+        }
+        for ext in ["dot", "xlt", "pot", "pps", "wps", "sdw"] {
+            assert!(office_mark_fits(&ole, ext), "{ext}");
+            assert!(!office_mark_fits(b"PK\x03\x04", ext), "{ext}");
+        }
+        assert!(office_mark_fits(b"<?xml version", "fodt") && !office_mark_fits(b"<html>", "fodt"));
+        assert!(office_mark_fits(b"<abiword", "abw") && !office_mark_fits(b"<!DOCTYPE html", "abw"));
+        assert!(office_mark_fits(&[0x1F, 0x8B, 8], "zabw") && !office_mark_fits(b"<?xml", "zabw"));
+        assert!(office_mark_fits(b"\xFFWPC\x10", "wpd") && !office_mark_fits(b"WPC", "wpd"));
+        assert!(office_mark_fits(b"{\\pwi\x15", "psw") && !office_mark_fits(b"{\\rtf1", "psw"));
+        assert!(office_mark_fits(&[0x32, 0xBE, 0, 0, 0], "wri") && !office_mark_fits(&[0x33, 0xBE, 0, 0], "wri"));
+        // Formats with no mark to check: anything goes on to their reader.
+        assert!(office_mark_fits(b"anything", "rst"));
+    }
+
+    /// Each text format pandoc reads, written by pandoc itself from a small Markdown
+    /// file, comes back as Markdown and plain text with its words.
+    #[test]
+    fn pandoc_text_formats_convert() {
+        let Ok(pandoc) = tool("pandoc") else {
+            eprintln!("pandoc isn't installed: text formats not tested");
+            return;
+        };
+        let readers = Command::new(&pandoc).arg("--list-input-formats").output().unwrap();
+        let readers = String::from_utf8_lossy(&readers.stdout).to_string();
+        let work = tempfile::tempdir().unwrap();
+        let md = work.path().join("base.md");
+        fs::write(&md, "# Report\n\nHello there from the test.\n").unwrap();
+        // (extension, pandoc's writer for the sample, its reader for the app)
+        let cases = [
+            ("rst", "rst", "rst"), ("tex", "latex", "latex"), ("latex", "latex", "latex"), ("org", "org", "org"),
+            ("adoc", "asciidoc", "asciidoc"), ("typ", "typst", "typst"), ("wiki", "mediawiki", "mediawiki"),
+            ("dbk", "docbook", "docbook"), ("ipynb", "ipynb", "ipynb"), ("textile", "textile", "textile"),
+            ("man", "man", "man"), ("opml", "opml", "opml"), ("xhtml", "html", "html"), ("fb2", "fb2", "fb2"),
+        ];
+        let mut tested = Vec::new();
+        for (ext, writer, reader) in cases {
+            if !readers.lines().any(|l| l == reader) {
+                eprintln!("this pandoc can't read {reader}: .{ext} not tested");
+                continue;
+            }
+            let src = work.path().join(format!("doc_{ext}.{ext}"));
+            let made = Command::new(&pandoc).args(["-s", "-f", "markdown", "-t", writer, "-o"]).arg(&src).arg(&md).status().unwrap();
+            assert!(made.success(), "pandoc can't write {writer}");
+            for target in ["md", "txt"] {
+                let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext} to {target}: {e}"));
+                let got = fs::read_to_string(&out).unwrap();
+                assert!(got.contains("Hello there"), ".{ext} to {target}: {got:?}");
+            }
+            tested.push(ext);
+        }
+        eprintln!("text formats tested: {}", tested.join(" "));
     }
 
     #[cfg(target_os = "macos")]

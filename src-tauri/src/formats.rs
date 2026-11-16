@@ -122,13 +122,33 @@ const KINDS: &[(Kind, &[&str], &[&str])] = &[
     // Finder saves when text is dragged to a folder) come in as plain documents first.
     (
         Kind::Doc,
-        &["docx", "doc", "odt", "rtf", "pages", "md", "markdown", "html", "htm", "txt", "epub", "rtfd", "textclipping"],
+        // Also read: Word and ODF templates and macro files, flat ODF, older word
+        // processors (WordPerfect, Works, AbiWord, StarWriter, Pocket Word, Windows
+        // Write) through LibreOffice; text formats (reStructuredText, LaTeX, Org,
+        // AsciiDoc, Typst, MediaWiki, DocBook, Jupyter, Textile, man pages, OPML,
+        // XHTML, FictionBook) through pandoc.
+        &[
+            "docx", "doc", "odt", "rtf", "pages", "md", "markdown", "html", "htm", "txt", "epub", "rtfd", "textclipping", "docm",
+            "dotx", "dotm", "dot", "ott", "fodt", "wpd", "wps", "abw", "zabw", "sdw", "psw", "wri", "rst", "tex", "latex",
+            "org", "adoc", "asciidoc", "typ", "mediawiki", "wiki", "dbk", "docbook", "ipynb", "textile", "man", "opml",
+            "xhtml", "fb2",
+        ],
         DOC_OUT,
     ),
     // Apple's Numbers and Keynote files go in through LibreOffice, which reads them.
-    (Kind::Sheet, &["xlsx", "xls", "ods", "csv", "tsv", "numbers"], &["pdf", "xlsx", "ods", "csv", "tsv"]),
+    // Also read: Excel and ODF templates and macro files, flat ODF, .tab text.
+    (
+        Kind::Sheet,
+        &["xlsx", "xls", "ods", "csv", "tsv", "numbers", "xlsm", "xltx", "xlt", "ots", "fods", "tab"],
+        &["pdf", "xlsx", "ods", "csv", "tsv"],
+    ),
     // JPG and PNG: a picture of each slide.
-    (Kind::Slides, &["pptx", "ppt", "odp", "key"], &["pdf", "pptx", "odp", "jpg", "png"]),
+    // Also read: PowerPoint and ODF templates, macro files and shows, flat ODF.
+    (
+        Kind::Slides,
+        &["pptx", "ppt", "odp", "key", "pptm", "potx", "potm", "ppsx", "pps", "pot", "otp", "fodp"],
+        &["pdf", "pptx", "odp", "jpg", "png"],
+    ),
     // Pictures of the pages, or the text (as a Word file it is text only: the PDF's
     // layout isn't kept).
     // SVG: each page as vector shapes. Markdown and EPUB: the text, like Word. PPTX: a
@@ -405,7 +425,8 @@ pub fn canonical(ext: &str) -> &str {
         "wave" => "wav",
         "oga" => "ogg",
         "qt" => "mov",
-        "htm" => "html",
+        "htm" | "xhtml" => "html",
+        "tab" => "tsv",
         "markdown" => "md",
         other => other,
     }
