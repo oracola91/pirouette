@@ -384,7 +384,8 @@ pub const MAX_SEGMENTS: usize = 10;
 /// The wheel sizes Settings offers, in segments. MAX_SEGMENTS is the default.
 pub const WHEEL_SIZES: [usize; 3] = [8, MAX_SEGMENTS, 12];
 
-/// The most segments any wheel size draws.
+/// The most segments any wheel size draws (the macOS keyboard wheel's words).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MOST_SEGMENTS: usize = 12;
 
 pub fn extension(path: &Path) -> Option<String> {

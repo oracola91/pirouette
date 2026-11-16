@@ -621,7 +621,8 @@ fn image(src: &Path, target: &str, out: &Path) -> Result<(), String> {
     cmd.args(image_options(target, quality().pictures));
     cmd.arg(format!("{}:{}", out_coder(target), out.display()));
     run(cmd, QUICK).map_err(|e| {
-        if target == "pdf" && e.contains("not authorized") {
+        // Older ImageMagick says "not authorized", newer "not allowed by the security policy".
+        if target == "pdf" && (e.contains("not authorized") || e.contains("security policy")) {
             "this computer's ImageMagick security policy doesn't allow writing PDF (common on Ubuntu)".to_string()
         } else {
             e
@@ -5770,8 +5771,12 @@ mod tests {
         let mut write = Command::new(magick().unwrap());
         write.arg(&made).args(["(", "-clone", "0", ")", "(", "-clone", "0", ")"]).arg(format!("psd:{}", layered.display()));
         assert!(write.status().unwrap().success());
-        let pdf = convert(&layered, "pdf", None, work.path()).unwrap();
-        assert_eq!(pdf_pages(&pdf), 1);
+        match convert(&layered, "pdf", None, work.path()) {
+            Ok(pdf) => assert_eq!(pdf_pages(&pdf), 1),
+            // Ubuntu's ImageMagick policy forbids writing PDF; the app says so.
+            Err(e) if e.contains("security policy doesn't allow writing PDF") => eprintln!("PSD to PDF not tested: {e}"),
+            Err(e) => panic!("PSD to PDF: {e}"),
+        }
         // Photo CD: ImageMagick writes its fixed sizes; the first, 192x128, is read.
         let pcd = work.path().join("scan.pcd");
         let mut write = Command::new(magick().unwrap());
