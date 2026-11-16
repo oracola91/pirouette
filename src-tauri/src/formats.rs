@@ -12,6 +12,7 @@ pub enum Kind {
     Slides,
     Pdf,
     Subtitles,
+    Drawing,
 }
 
 impl Kind {
@@ -26,6 +27,7 @@ impl Kind {
             Kind::Slides => "slides",
             Kind::Pdf => "pdf",
             Kind::Subtitles => "subs",
+            Kind::Drawing => "drawing",
         }
     }
 
@@ -40,6 +42,7 @@ impl Kind {
             Kind::Slides => "Presentations",
             Kind::Pdf => "PDFs",
             Kind::Subtitles => "Subtitles",
+            Kind::Drawing => "Drawings",
         }
     }
 }
@@ -158,6 +161,14 @@ const KINDS: &[(Kind, &[&str], &[&str])] = &[
     // TXT: only the words, without times. Also read: SubStation (ASS, SSA), SAMI,
     // song lyrics (LRC), MicroDVD and SubViewer (SUB), and TV captions (SCC).
     (Kind::Subtitles, &["srt", "vtt", "ass", "ssa", "smi", "sami", "lrc", "sub", "scc"], &["srt", "vtt", "txt"]),
+    // Drawings and diagrams, read by LibreOffice Draw: Visio, CorelDraw, Publisher,
+    // Windows metafiles, ODF drawings, CGM and DXF. PDF and SVG keep them as shapes; JPG
+    // and PNG are a picture of each page.
+    (
+        Kind::Drawing,
+        &["vsd", "vsdx", "cdr", "pub", "emf", "wmf", "odg", "fodg", "cgm", "dxf"],
+        &["pdf", "svg", "png", "jpg"],
+    ),
 ];
 
 /// The Tools wheel: what can be done to a file while it keeps its format, by the id
@@ -543,7 +554,7 @@ mod tests {
     #[test]
     fn rows_cover_every_kind_once() {
         let keys: Vec<_> = rows().map(|r| r.key).collect();
-        assert_eq!(keys, ["image", MORE_ROW, "audio", "video", "doc", "sheet", "slides", "pdf", "subs"]);
+        assert_eq!(keys, ["image", MORE_ROW, "audio", "video", "doc", "sheet", "slides", "pdf", "subs", "drawing"]);
         assert!(rows().all(|r| r.off.iter().all(|f| r.outputs.contains(f))));
     }
 

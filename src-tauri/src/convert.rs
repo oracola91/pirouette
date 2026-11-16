@@ -159,7 +159,8 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
     // Office files must really be what their name says. LibreOffice otherwise picks a
     // reader from the content: a broken .docx comes out as a PDF of its raw bytes, and
     // a web page saved as .doc is read as a web page.
-    let head = read_head(&input)?;
+    // 64 bytes: a Windows enhanced metafile's mark is at 40.
+    let head = read_start(&input, 64)?;
     if !office_mark_fits(&head, &ext) {
         return Err(format!("this is not a valid .{ext} file"));
     }
@@ -223,6 +224,13 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
         }
         (None, Kind::Sheet | Kind::Slides) => file(libreoffice(&input, target, &out)),
         (None, Kind::Pdf) => pdf(&input, target, &out, &work),
+        // Drawings: LibreOffice Draw writes PDF and SVG itself; a picture of each page
+        // is the PDF's pages drawn, as for slides.
+        (None, Kind::Drawing) if matches!(target, "jpg" | "png") => {
+            let pages = work.path().join("drawing.pdf");
+            libreoffice(&input, "pdf", &pages).and_then(|()| pdf(&pages, target, &out, &work))
+        }
+        (None, Kind::Drawing) => file(libreoffice(&input, target, &out)),
         (None, Kind::Subtitles) if target == "txt" && matches!(ext.as_str(), "srt" | "vtt") => file(subtitle_text(&input, &out)),
         // The other subtitle formats: SRT first (ffmpeg), then its words.
         (None, Kind::Subtitles) if target == "txt" => {
@@ -404,6 +412,27 @@ fn office_mark_fits(head: &[u8], ext: &str) -> bool {
         "psw" => &[b"{\\pwi"],
         // Windows Write: 0x31 or 0x32, then 0xBE 0 0.
         "wri" => &[&[0x31, 0xBE, 0, 0], &[0x32, 0xBE, 0, 0]],
+        // Visio, Publisher: OLE; Visio 2013 and ODF drawings: ZIP. CorelDraw: RIFF, or
+        // ZIP from X4 on.
+        "vsd" | "pub" => &[OLE],
+        "vsdx" | "odg" => &[b"PK"],
+        "fodg" => &[b"<?xml"],
+        "cdr" => &[b"RIFF", b"PK"],
+        // Windows metafile: placeable, or plain in memory (1) or on disk (2).
+        "wmf" => &[&[0xD7, 0xCD, 0xC6, 0x9A], &[1, 0, 9, 0], &[2, 0, 9, 0]],
+        "emf" => return head.starts_with(&[1, 0, 0, 0]) && head.get(40..44) == Some(b" EMF"),
+        // CGM: binary, opening with Begin Metafile (class 0, element 1), or clear text.
+        "cgm" => {
+            let text = String::from_utf8_lossy(head).trim_start().to_ascii_uppercase();
+            return (head.first() == Some(&0) && head.get(1).is_some_and(|b| (0x20..=0x3F).contains(b))) || text.starts_with("BEGMF");
+        }
+        // DXF: text, its first group a 0 SECTION (a 999 comment may come first), or binary.
+        "dxf" => {
+            let text = String::from_utf8_lossy(head);
+            let mut lines = text.lines().map(str::trim);
+            let first = lines.next().unwrap_or_default();
+            return head.starts_with(b"AutoCAD Binary DXF") || first == "999" || (first == "0" && lines.next() == Some("SECTION"));
+        }
         _ => &[b""],
     };
     marks.iter().any(|m| head.starts_with(m))
@@ -1609,6 +1638,9 @@ fn libreoffice(src: &Path, target: &str, out: &Path) -> Result<(), String> {
         }
         Some("fodp") => {
             cmd.arg("--infilter=OpenDocument Presentation Flat XML");
+        }
+        Some("fodg") => {
+            cmd.arg("--infilter=OpenDocument Drawing Flat XML");
         }
         Some("abw" | "zabw") => {
             cmd.arg("--infilter=AbiWord");
@@ -6006,6 +6038,16 @@ mod tests {
         assert!(office_mark_fits(b"\xFFWPC\x10", "wpd") && !office_mark_fits(b"WPC", "wpd"));
         assert!(office_mark_fits(b"{\\pwi\x15", "psw") && !office_mark_fits(b"{\\rtf1", "psw"));
         assert!(office_mark_fits(&[0x32, 0xBE, 0, 0, 0], "wri") && !office_mark_fits(&[0x33, 0xBE, 0, 0], "wri"));
+        let mut emf = vec![1, 0, 0, 0];
+        emf.resize(40, 0);
+        emf.extend(b" EMF");
+        assert!(office_mark_fits(&emf, "emf") && !office_mark_fits(&[1, 0, 0, 0], "emf"));
+        assert!(office_mark_fits(&[0xD7, 0xCD, 0xC6, 0x9A], "wmf") && !office_mark_fits(b"<svg", "wmf"));
+        assert!(office_mark_fits(&[0, 0x34, 0x13], "cgm") && office_mark_fits(b" BEGMF 'x';", "cgm"));
+        assert!(!office_mark_fits(b"%!PS", "cgm"));
+        assert!(office_mark_fits(b"  0\nSECTION\n  2\nHEADER", "dxf") && office_mark_fits(b"999\nmade by\n  0\n", "dxf"));
+        assert!(!office_mark_fits(b"<html>", "dxf") && !office_mark_fits(b"  0\nEOF", "dxf"));
+        assert!(office_mark_fits(b"RIFF\0\0\0\0CDR", "cdr") && office_mark_fits(&ole, "vsd") && !office_mark_fits(b"PK", "vsd"));
         // Formats with no mark to check: anything goes on to their reader.
         assert!(office_mark_fits(b"anything", "rst"));
     }
