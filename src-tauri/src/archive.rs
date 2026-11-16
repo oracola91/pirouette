@@ -1,5 +1,6 @@
 //! Archives, from the Actions wheel: ZIP, TAR and TAR.GZ made of whatever is dragged,
-//! and ZIP, TAR, TAR.GZ and RAR unpacked into a new folder next to them. Both go
+//! and ZIP, TAR (plain, gzip, bzip2, xz, zstd, lzma), RAR, 7z, ISO, CPIO, XAR, CAB, LHA
+//! and JAR unpacked into a new folder next to them. Both go
 //! through bsdtar (libarchive): built into macOS, and into Windows 10 and later as
 //! tar.exe; the libarchive-tools package on Linux. bsdtar refuses names with ".." and
 //! strips a leading "/", so nothing lands outside the new folder, and a size budget
@@ -27,7 +28,7 @@ fn budget(archive_size: u64) -> u64 {
 /// What the archive types are, by name: "report.zip", "site.tar.gz".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Archive {
-    /// Anything bsdtar reads: ZIP, TAR, TAR.GZ, RAR.
+    /// Anything bsdtar reads: ZIP, TARs, RAR, 7z, ISO, CPIO, XAR, CAB, LHA.
     Bsdtar,
     /// One gzip-compressed file.
     Gzip,
@@ -43,6 +44,22 @@ fn split_name(name: &str) -> Option<(Archive, &str)> {
         (".zip", Archive::Bsdtar),
         (".tar", Archive::Bsdtar),
         (".rar", Archive::Bsdtar),
+        (".7z", Archive::Bsdtar),
+        (".tar.bz2", Archive::Bsdtar),
+        (".tbz2", Archive::Bsdtar),
+        (".tbz", Archive::Bsdtar),
+        (".tar.xz", Archive::Bsdtar),
+        (".txz", Archive::Bsdtar),
+        (".tar.zst", Archive::Bsdtar),
+        (".tzst", Archive::Bsdtar),
+        (".tar.lzma", Archive::Bsdtar),
+        (".iso", Archive::Bsdtar),
+        (".cpio", Archive::Bsdtar),
+        (".xar", Archive::Bsdtar),
+        (".cab", Archive::Bsdtar),
+        (".lzh", Archive::Bsdtar),
+        (".lha", Archive::Bsdtar),
+        (".jar", Archive::Bsdtar),
         (".gz", Archive::Gzip),
     ] {
         if lower.ends_with(end) && lower.len() > end.len() {
@@ -226,6 +243,7 @@ fn unpack_into_new_folder(src: &Path, dir: &Path, stem: &str, budget: u64) -> Re
     cmd.args(["-x", "-o", "-f"]).arg(src).arg("-C").arg(work.path());
     let parent = src.parent().unwrap_or(dir);
     run(cmd, Some((work.path(), budget)), &[work.path(), parent])?;
+    folders_writable(work.path()).map_err(Failure::Io)?;
     let entries: Vec<PathBuf> = fs::read_dir(work.path())
         .map_err(Failure::Io)?
         .flatten()
@@ -245,6 +263,33 @@ fn unpack_into_new_folder(src: &Path, dir: &Path, stem: &str, budget: u64) -> Re
             })
         }
     }
+}
+
+/// Gives the user write access to every unpacked folder (files keep their modes). Disc
+/// images (ISO) store their folders read-only: such a folder couldn't be moved into
+/// place (moving a folder rewrites its own ".."), nor tidied up afterwards. Links are
+/// not followed.
+fn folders_writable(root: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(folder) = todo.pop() {
+            let meta = fs::symlink_metadata(&folder)?;
+            let mode = meta.permissions().mode();
+            if mode & 0o700 != 0o700 {
+                fs::set_permissions(&folder, fs::Permissions::from_mode(mode | 0o700))?;
+            }
+            for entry in fs::read_dir(&folder)?.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    todo.push(entry.path());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    Ok(())
 }
 
 /// Moves `from` into `dir` as `name`, or "name 2", "name 3", ... ("report 2.pdf" for a
@@ -439,6 +484,11 @@ mod tests {
         assert_eq!(split_name("Site.TGZ"), Some((Archive::Bsdtar, "Site")));
         assert_eq!(split_name("log.txt.gz"), Some((Archive::Gzip, "log.txt")));
         assert_eq!(split_name("photos.rar"), Some((Archive::Bsdtar, "photos")));
+        assert_eq!(split_name("backup.tar.xz"), Some((Archive::Bsdtar, "backup")));
+        assert_eq!(split_name("disk.ISO"), Some((Archive::Bsdtar, "disk")));
+        for name in ["a.7z", "a.tbz2", "a.tar.zst", "a.cpio", "a.xar", "a.cab", "a.lzh", "a.lha", "a.jar"] {
+            assert!(is_archive(name), "{name}");
+        }
         assert_eq!(split_name(".zip"), None);
         assert_eq!(split_name("notes.txt"), None);
         assert!(is_archive("/tmp/a.ZIP") && !is_archive("/tmp/a.pdf"));
@@ -488,6 +538,44 @@ mod tests {
         assert!(unpack(&fake, None, work.path()).is_err());
         let left: Vec<_> = fs::read_dir(work.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert!(left.iter().all(|n| !n.to_string_lossy().starts_with(".pirouette-") && n != "fake"), "{left:?}");
+    }
+
+    /// Each archive kind this bsdtar can write, packed from one folder and unpacked as
+    /// that folder again. (CAB and LHA it reads only: checked by hand with libarchive's
+    /// own test files.)
+    #[test]
+    fn more_archive_kinds_unpack() {
+        let Ok(tar) = bsdtar() else {
+            eprintln!("bsdtar isn't installed: archives not tested");
+            return;
+        };
+        let work = tempfile::tempdir().unwrap();
+        let notes = work.path().join("Notes");
+        fs::create_dir(&notes).unwrap();
+        fs::write(notes.join("a.txt"), b"hello there").unwrap();
+        let mut tested = Vec::new();
+        for (ext, args) in [
+            ("7z", &["--format", "7zip"][..]),
+            ("tar.bz2", &["-j"][..]),
+            ("txz", &["-J"][..]),
+            ("tar.zst", &["--zstd"][..]),
+            ("tar.lzma", &["--lzma"][..]),
+            ("iso", &["--format", "iso9660"][..]),
+            ("cpio", &["--format", "cpio"][..]),
+            ("xar", &["--format", "xar"][..]),
+        ] {
+            let archive = work.path().join(format!("pack.{ext}"));
+            let made = Command::new(&tar).arg("-c").args(args).arg("-f").arg(&archive).arg("-C").arg(work.path()).arg("Notes").output().unwrap();
+            if !made.status.success() || !archive.is_file() {
+                eprintln!("this bsdtar can't write .{ext}: not tested");
+                continue;
+            }
+            let out = unpack(&archive, None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"hello there", ".{ext}");
+            fs::remove_dir_all(&out).unwrap();
+            tested.push(ext);
+        }
+        eprintln!("archives tested: {}", tested.join(" "));
     }
 
     #[test]
