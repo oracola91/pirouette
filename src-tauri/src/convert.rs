@@ -43,7 +43,8 @@ const VIDEO: Duration = Duration::from_secs(3600);
 /// files or addresses.
 const FFMPEG_FORMATS: &str = "mov,mp4,m4a,matroska,webm,avi,mp3,wav,flac,aiff,ogg,aac,asf,srt,webvtt,\
      mpeg,mpegvideo,mpegts,flv,dv,mxf,rm,wtv,h264,hevc,dhav,bink,flic,\
-     ac3,eac3,amr,amrnb,amrwb,au,caf,dss,voc,wv,tta,w64,ape,mpc,mpc8,tak,dsf,iff,dts";
+     ac3,eac3,amr,amrnb,amrwb,au,caf,dss,voc,wv,tta,w64,ape,mpc,mpc8,tak,dsf,iff,dts,\
+     ass,sami,lrc,microdvd,subviewer,subviewer1,scc";
 
 /// At most 1920 on the long side, and even sizes, which the video encoders need. For
 /// Compress, and for the old formats (AVI, WMV), whose players can't take 4K.
@@ -231,7 +232,12 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
         }
         (None, Kind::Sheet | Kind::Slides) => file(libreoffice(&input, target, &out)),
         (None, Kind::Pdf) => pdf(&input, target, &out, &work),
-        (None, Kind::Subtitles) if target == "txt" => file(subtitle_text(&input, &out)),
+        (None, Kind::Subtitles) if target == "txt" && matches!(ext.as_str(), "srt" | "vtt") => file(subtitle_text(&input, &out)),
+        // The other subtitle formats: SRT first (ffmpeg), then its words.
+        (None, Kind::Subtitles) if target == "txt" => {
+            let srt = work.path().join("words.srt");
+            file(ffmpeg(&input, &["-map", "0:s:0"], &srt, QUICK).and_then(|()| subtitle_text(&srt, &out)))
+        }
         (None, Kind::Subtitles) => file(ffmpeg(&input, &["-map", "0:s:0"], &out, QUICK)),
     };
     // Tool messages often start with a full path; keep only file names.
@@ -5898,6 +5904,38 @@ mod tests {
         }
         eprintln!("containers tested: {}", tested.join(" "));
         assert!(tested.len() >= 25, "{tested:?}");
+    }
+
+    /// Each subtitle format the wheel reads becomes SRT, WebVTT and text with its words.
+    #[test]
+    fn more_subtitle_formats_convert() {
+        if tool("ffmpeg").is_err() {
+            eprintln!("ffmpeg isn't installed: subtitles not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let samples: &[(&str, &str)] = &[
+            ("ass", "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Default,Arial,20\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,{\\i1}Hello there{\\i0}\n"),
+            ("ssa", "[Script Info]\nScriptType: v4.00\n\n[V4 Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Default,Arial,20\n\n[Events]\nFormat: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: Marked=0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Hello there\n"),
+            ("smi", "<SAMI>\n<BODY>\n<SYNC Start=1000><P Class=ENCC>Hello there\n<SYNC Start=2500><P Class=ENCC>&nbsp;\n</BODY>\n</SAMI>\n"),
+            ("lrc", "[ti:Song]\n[00:01.00]Hello there\n[00:02.50]\n"),
+            // ffmpeg knows MicroDVD by three cue lines in a row.
+            ("sub", "{25}{62}Hello there\n{75}{100}Second line\n{125}{150}Third line\n"),
+            // Captions: "Hello there" in CEA-608 pop-on codes at one second.
+            ("scc", "Scenarist_SCC V1.0\n\n00:00:01:00\t9420 9420 94ae 94ae 9452 9452 c8e5 ecec ef20 f468 e5f2 e580 942f 942f\n\n00:00:02:15\t942c 942c\n"),
+        ];
+        for (ext, text) in samples {
+            let src = work.path().join(format!("words_{ext}.{ext}"));
+            fs::write(&src, text).unwrap();
+            for target in ["srt", "vtt", "txt"] {
+                let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext} to {target}: {e}"));
+                let got = fs::read_to_string(&out).unwrap();
+                assert!(got.to_lowercase().contains("hello there"), ".{ext} to {target}: {got:?}");
+                if target == "txt" {
+                    assert!(!got.contains("-->") && !got.contains("{\\i1}"), ".{ext} to txt: {got:?}");
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

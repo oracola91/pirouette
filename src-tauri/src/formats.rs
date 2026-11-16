@@ -135,8 +135,9 @@ const KINDS: &[(Kind, &[&str], &[&str])] = &[
     // slide with a picture of each page. XLSX: each page's text put back into rows and
     // columns, one sheet per page.
     (Kind::Pdf, &["pdf"], PDF_OUT),
-    // TXT: only the words, without times.
-    (Kind::Subtitles, &["srt", "vtt"], &["srt", "vtt", "txt"]),
+    // TXT: only the words, without times. Also read: SubStation (ASS, SSA), SAMI,
+    // song lyrics (LRC), MicroDVD and SubViewer (SUB), and TV captions (SCC).
+    (Kind::Subtitles, &["srt", "vtt", "ass", "ssa", "smi", "sami", "lrc", "sub", "scc"], &["srt", "vtt", "txt"]),
 ];
 
 /// The Tools wheel: what can be done to a file while it keeps its format, by the id
