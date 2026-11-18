@@ -246,7 +246,9 @@ mod tests {
         assert_eq!(metadata["uuid"], UUID);
         let script = FILES[1].1;
         assert!(script.contains("'pirouette.sock'"), "the socket in linux.rs");
-        assert!(script.contains(&format!("const WHEEL_SIZE = {};", crate::wheel::SIZE)), "the wheel's size");
+        let side = |p: u16| (crate::wheel::SIZE * f64::from(p) / 100.0).round();
+        assert!(script.contains(&format!("const WHEEL_SIDE_MIN = {};", side(crate::wheel::SCALE_MIN))), "the wheel's smallest size");
+        assert!(script.contains(&format!("const WHEEL_SIDE_MAX = {};", side(crate::wheel::SCALE_MAX))), "the wheel's largest size");
         let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let wheel = config["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == "wheel").unwrap();
         assert!(script.contains(&format!("const WHEEL_TITLE = '{}';", wheel["title"].as_str().unwrap())));

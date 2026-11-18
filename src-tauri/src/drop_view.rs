@@ -95,7 +95,8 @@ impl DropView {
         let p = self.convertPoint_fromView(sender.draggingLocation(), None);
         let size = self.bounds().size;
         let n = wheel::lock(&self.ivars().app.state::<WheelState>().formats).len();
-        wheel::hover_at(p.x - size.width / 2.0, p.y - size.height / 2.0, n)
+        // The view's y points up; the window may be scaled (Settings > Wheel > Scale).
+        wheel::hover_in_window(p.x, size.height - p.y, size.width, n)
     }
 
     /// Whether the dragged file is over this view (the wheel's square window).

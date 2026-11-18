@@ -207,7 +207,8 @@ pub fn open(app: &AppHandle) {
     let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
     let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
     let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-    let size = (wheel::SIZE * dpi_x as f64 / 96.0).round() as i32;
+    // Settings > Wheel > Scale grows the window; the page and the icon grow with it.
+    let size = (wheel::side() * dpi_x as f64 / 96.0).round() as i32;
     let work = info.rcWork;
     let x = (pt.x - size / 2).min(work.right - size).max(work.left);
     let y = (pt.y - size / 2).min(work.bottom - size).max(work.top);
@@ -340,7 +341,7 @@ impl WheelDropTarget {
         let scale = unsafe { GetDpiForWindow(self.wheel) }.max(96) as f64 / 96.0;
         let (x, y) = (p.x as f64 / scale, p.y as f64 / scale);
         let n = wheel::lock(&self.app.state::<WheelState>().formats).len();
-        wheel::hover_at(x - wheel::SIZE / 2.0, wheel::SIZE / 2.0 - y, n)
+        wheel::hover_in_window(x, y, wheel::side(), n)
     }
 
     /// Lights up what is under the cursor and accepts the drop only over a format (or on

@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::{fs, thread, time::Duration};
 
 use gtk::prelude::*;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, KeyButMask, Window};
 use x11rb::rust_connection::RustConnection;
@@ -319,6 +319,9 @@ pub fn open(app: &AppHandle, pinned: bool) {
     let Some(win) = app.get_webview_window("wheel") else {
         return;
     };
+    // Settings > Wheel > Scale: the page grows with the window.
+    let side = wheel::side();
+    let _ = win.set_size(LogicalSize::new(side, side));
     if pinned {
         let _ = win.set_focusable(true);
         let _ = win.center();
@@ -329,7 +332,7 @@ pub fn open(app: &AppHandle, pinned: bool) {
     let _ = win.set_focusable(false);
     if let Ok(cursor) = app.cursor_position() {
         if let Ok(Some(monitor)) = app.monitor_from_point(cursor.x, cursor.y) {
-            let size = (wheel::SIZE * monitor.scale_factor()).round() as i32;
+            let size = (side * monitor.scale_factor()).round() as i32;
             let area = monitor.work_area();
             let (left, top) = (area.position.x, area.position.y);
             let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
@@ -473,7 +476,7 @@ fn connect_drop(app: AppHandle, webview: webkit2gtk::WebView) {
 
 fn hover_at(app: &AppHandle, x: i32, y: i32) -> Hover {
     let n = wheel::lock(&app.state::<WheelState>().formats).len();
-    wheel::hover_at(x as f64 - wheel::SIZE / 2.0, wheel::SIZE / 2.0 - y as f64, n)
+    wheel::hover_in_window(f64::from(x), f64::from(y), wheel::side(), n)
 }
 
 fn set_hover(app: &AppHandle, st: &mut DropState, hover: Hover) {

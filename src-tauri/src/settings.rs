@@ -128,6 +128,30 @@ pub struct Settings {
     pub hold_to_convert: bool,
     /// Most segments a wheel shows at once (Settings > Wheel > Wheel size).
     pub wheel_size: WheelSize,
+    /// How big the wheel is drawn, words included (Settings > Wheel > Scale).
+    pub wheel_scale: WheelScale,
+}
+
+/// How big the wheel is drawn, in percent: a stop on the slider (wheel::scale_offered).
+/// Any other number in the file counts as Normal (100).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WheelScale(pub u16);
+
+impl Default for WheelScale {
+    fn default() -> Self {
+        WheelScale(100)
+    }
+}
+
+impl WheelScale {
+    pub fn percent(self) -> u16 {
+        if crate::wheel::scale_offered(self.0) { self.0 } else { 100 }
+    }
+
+    pub fn factor(self) -> f64 {
+        f64::from(self.percent()) / 100.0
+    }
 }
 
 /// How many segments a wheel shows at once: 8, 10 or 12 (formats::WHEEL_SIZES). Any
@@ -592,6 +616,24 @@ mod tests {
         // A hand-edited file with a size the wheel doesn't offer: the default.
         let odd: Settings = serde_json::from_str(r#"{"wheel_size":3}"#).unwrap();
         assert_eq!(odd.wheel_size.segments(), 10);
+    }
+
+    #[test]
+    fn the_wheel_scale_defaults_to_normal() {
+        let old: Settings = serde_json::from_str(r#"{"save_to":"downloads","wheel_size":12}"#).unwrap();
+        assert_eq!(old.wheel_scale.percent(), 100);
+        assert_eq!(old.wheel_scale.factor(), 1.0);
+        let set: Settings = serde_json::from_str(r#"{"wheel_scale":150}"#).unwrap();
+        assert_eq!(set.wheel_scale.percent(), 150);
+        assert_eq!(set.wheel_scale.factor(), 1.5);
+        // A hand-edited file with a scale Settings doesn't offer: Normal.
+        let odd: Settings = serde_json::from_str(r#"{"wheel_scale":400}"#).unwrap();
+        assert_eq!(odd.wheel_scale.factor(), 1.0);
+        let between: Settings = serde_json::from_str(r#"{"wheel_scale":115}"#).unwrap();
+        assert_eq!(between.wheel_scale.percent(), 115);
+        let off_step: Settings = serde_json::from_str(r#"{"wheel_scale":113}"#).unwrap();
+        assert_eq!(off_step.wheel_scale.percent(), 100);
+        assert_eq!(serde_json::to_value(set).unwrap()["wheel_scale"], 150);
     }
 
     #[test]
