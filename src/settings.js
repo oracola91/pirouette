@@ -223,6 +223,19 @@ function wheel(v) {
     // Saved when let go, as the wheel only takes it at its next opening.
     onchange: (e) => change({ what: 'transparency', value: Number(e.target.value) }),
   });
+  const scale = h('input', {
+    type: 'range',
+    id: 'wheel-scale',
+    min: v.wheel_scale_min,
+    max: v.wheel_scale_max,
+    step: v.wheel_scale_step,
+    value: v.wheel_scale,
+    'aria-label': 'Wheel scale, from normal to larger',
+    'aria-valuetext': `${v.wheel_scale}%`,
+    oninput: (e) => e.target.setAttribute('aria-valuetext', `${e.target.value}%`),
+    // Saved when let go, as the wheel only takes it at its next opening.
+    onchange: (e) => change({ what: 'wheel-scale', percent: Number(e.target.value) }),
+  });
   const look = group(
     'Look',
     row('Highlight colour', swatches),
@@ -235,8 +248,8 @@ function wheel(v) {
     ),
     row(
       'Scale',
-      segments('wheel-scale', v.wheel_scales.map((s) => ({ key: String(s.percent), label: s.label })), String(v.wheel_scale), (p) => change({ what: 'wheel-scale', percent: Number(p) }), 'How big the wheel is'),
-      'The whole wheel, words included, bigger for easier reading. Takes effect at the next wheel.',
+      h('div', { class: 'ends' }, 'Normal', scale, 'Larger'),
+      'The whole wheel, words included, up to half as big again, for easier reading. Takes effect at the next wheel.',
     ),
   );
 

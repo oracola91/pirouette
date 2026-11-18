@@ -15,9 +15,17 @@ pub const SIZE: f64 = 340.0;
 pub const R_IN: f64 = 62.0;
 pub const R_OUT: f64 = 160.0;
 
-/// Settings > Wheel > Scale, in percent: Normal, Large, Largest. The whole wheel grows,
-/// words included, so they stay as big as their segments allow at every wheel size.
-pub const SCALES: [u16; 3] = [100, 125, 150];
+/// Settings > Wheel > Scale, a slider in percent: from Normal up to half as big again,
+/// in steps of SCALE_STEP. The whole wheel grows, words included, so they stay as big
+/// as their segments allow at every wheel size.
+pub const SCALE_MIN: u16 = 100;
+pub const SCALE_MAX: u16 = 150;
+pub const SCALE_STEP: u16 = 5;
+
+/// A scale the slider can stop at.
+pub fn scale_offered(percent: u16) -> bool {
+    (SCALE_MIN..=SCALE_MAX).contains(&percent) && percent % SCALE_STEP == 0
+}
 
 /// The scale the next wheel opens at, as f64 bits: set at the start and from Settings.
 static SCALE: AtomicU64 = AtomicU64::new(1.0f64.to_bits());
@@ -361,7 +369,7 @@ mod tests {
     #[test]
     fn a_larger_wheel_finds_the_same_segments() {
         let r = (R_IN + R_OUT) / 2.0;
-        for scale in SCALES.map(|p| f64::from(p) / 100.0) {
+        for scale in (SCALE_MIN..=SCALE_MAX).step_by(usize::from(SCALE_STEP)).map(|p| f64::from(p) / 100.0) {
             let side = side_at(scale);
             let c = side / 2.0;
             // The same spots on the wheel, in the bigger window's points (y down).
@@ -378,6 +386,16 @@ mod tests {
         assert_eq!(side_at(1.0), SIZE);
         assert_eq!(side_at(1.25), 425.0);
         assert_eq!(side_at(1.5), 510.0);
+    }
+
+    #[test]
+    fn the_slider_stops_every_five_percent_up_to_150() {
+        for p in [100, 105, 125, 140, 150] {
+            assert!(scale_offered(p), "{p}");
+        }
+        for p in [0, 50, 95, 99, 101, 103, 149, 155, 200] {
+            assert!(!scale_offered(p), "{p}");
+        }
     }
 
     #[test]

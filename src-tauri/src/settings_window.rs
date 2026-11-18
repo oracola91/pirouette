@@ -120,15 +120,11 @@ pub struct View {
     /// Most segments a wheel shows at once, and the sizes to pick from.
     wheel_size: usize,
     wheel_sizes: Vec<usize>,
-    /// How big the wheel is drawn, in percent, and the scales to pick from.
+    /// How big the wheel is drawn, in percent, and the slider's ends and step.
     wheel_scale: u16,
-    wheel_scales: Vec<ScaleChoice>,
-}
-
-#[derive(Serialize)]
-struct ScaleChoice {
-    percent: u16,
-    label: &'static str,
+    wheel_scale_min: u16,
+    wheel_scale_max: u16,
+    wheel_scale_step: u16,
 }
 
 /// One change from the page.
@@ -152,7 +148,7 @@ pub enum Change {
     Hold { on: bool },
     /// Most segments a wheel shows at once: one of formats::WHEEL_SIZES.
     WheelSize { segments: u8 },
-    /// How big the wheel is drawn, in percent: one of wheel::SCALES.
+    /// How big the wheel is drawn, in percent: a stop on the slider.
     WheelScale { percent: u16 },
 }
 
@@ -236,7 +232,9 @@ fn view(app: &AppHandle) -> View {
         wheel_size: s.wheel_size.segments(),
         wheel_sizes: formats::WHEEL_SIZES.to_vec(),
         wheel_scale: s.wheel_scale.percent(),
-        wheel_scales: crate::wheel::SCALES.iter().map(|&percent| ScaleChoice { percent, label: WheelScale::label(percent) }).collect(),
+        wheel_scale_min: crate::wheel::SCALE_MIN,
+        wheel_scale_max: crate::wheel::SCALE_MAX,
+        wheel_scale_step: crate::wheel::SCALE_STEP,
     }
 }
 
@@ -326,7 +324,7 @@ fn edit(change: &Change) -> Result<Edit, String> {
             Box::new(move |s| s.wheel_size = size)
         }
         Change::WheelScale { percent } => {
-            if !crate::wheel::SCALES.contains(percent) {
+            if !crate::wheel::scale_offered(*percent) {
                 return Err(format!("no wheel scale {percent}%"));
             }
             let scale = WheelScale(*percent);
@@ -563,17 +561,14 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_scale_is_one_of_three() {
-        let c: Change = serde_json::from_str(r#"{"what":"wheel-scale","percent":125}"#).unwrap();
-        assert_eq!(changed(c).wheel_scale.percent(), 125);
+    fn the_wheel_scale_is_a_stop_on_the_slider() {
+        let c: Change = serde_json::from_str(r#"{"what":"wheel-scale","percent":115}"#).unwrap();
+        assert_eq!(changed(c).wheel_scale.percent(), 115);
         let c: Change = serde_json::from_str(r#"{"what":"wheel-scale","percent":150}"#).unwrap();
         assert_eq!(changed(c).wheel_scale.percent(), 150);
-        for p in [0, 50, 99, 101, 175, 200, 1000] {
+        for p in [0, 50, 99, 101, 113, 155, 175, 200, 1000] {
             assert!(edit(&Change::WheelScale { percent: p }).is_err(), "{p}");
         }
-        assert_eq!(WheelScale::label(100), "Normal");
-        assert_eq!(WheelScale::label(125), "Large");
-        assert_eq!(WheelScale::label(150), "Largest");
     }
 
     #[test]

@@ -132,8 +132,8 @@ pub struct Settings {
     pub wheel_scale: WheelScale,
 }
 
-/// How big the wheel is drawn, in percent: one of wheel::SCALES. Any other number in
-/// the file counts as Normal (100).
+/// How big the wheel is drawn, in percent: a stop on the slider (wheel::scale_offered).
+/// Any other number in the file counts as Normal (100).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WheelScale(pub u16);
@@ -146,20 +146,11 @@ impl Default for WheelScale {
 
 impl WheelScale {
     pub fn percent(self) -> u16 {
-        if crate::wheel::SCALES.contains(&self.0) { self.0 } else { 100 }
+        if crate::wheel::scale_offered(self.0) { self.0 } else { 100 }
     }
 
     pub fn factor(self) -> f64 {
         f64::from(self.percent()) / 100.0
-    }
-
-    /// What Settings calls each scale.
-    pub fn label(percent: u16) -> &'static str {
-        match percent {
-            125 => "Large",
-            150 => "Largest",
-            _ => "Normal",
-        }
     }
 }
 
@@ -638,6 +629,10 @@ mod tests {
         // A hand-edited file with a scale Settings doesn't offer: Normal.
         let odd: Settings = serde_json::from_str(r#"{"wheel_scale":400}"#).unwrap();
         assert_eq!(odd.wheel_scale.factor(), 1.0);
+        let between: Settings = serde_json::from_str(r#"{"wheel_scale":115}"#).unwrap();
+        assert_eq!(between.wheel_scale.percent(), 115);
+        let off_step: Settings = serde_json::from_str(r#"{"wheel_scale":113}"#).unwrap();
+        assert_eq!(off_step.wheel_scale.percent(), 100);
         assert_eq!(serde_json::to_value(set).unwrap()["wheel_scale"], 150);
     }
 
