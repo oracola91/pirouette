@@ -373,7 +373,7 @@ fn wheel_arrow(app: AppHandle, key: usize) {
 fn wheel_words(app: AppHandle, words: Vec<wheel::WordBox>) {
     #[cfg(target_os = "macos")]
     {
-        let words: Vec<_> = words.into_iter().filter(wheel::WordBox::valid).take(formats::MAX_SEGMENTS).collect();
+        let words: Vec<_> = words.into_iter().filter(wheel::WordBox::valid).take(formats::MOST_SEGMENTS).collect();
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || wheel_window::set_words(&handle, words));
     }

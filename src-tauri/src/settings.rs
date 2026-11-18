@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::formats::Kind;
+use crate::formats;
 use crate::wheel::{lock, Which};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,8 +96,11 @@ impl Quality {
 #[serde(default)]
 pub struct Settings {
     pub save_to: SaveTo,
-    /// Formats left off the wheel, as "kind:format" (for example "image:avif").
+    /// Formats left off the wheel, as "row:format" (for example "image:avif").
     pub hidden: BTreeSet<String>,
+    /// Formats a row starts without (formats::off_unless_chosen) that were turned on,
+    /// as "row:format" (for example "image-more:bmp").
+    pub shown: BTreeSet<String>,
     pub quality: Quality,
     /// The shelf at the top of the screen is switched off (it is on unless chosen so).
     pub shelf_off: bool,
@@ -123,6 +126,27 @@ pub struct Settings {
     /// Hold to Convert: a file pressed and held still for a moment, then dragged,
     /// opens the Formats wheel without a key (for touch screens). Off unless chosen.
     pub hold_to_convert: bool,
+    /// Most segments a wheel shows at once (Settings > Wheel > Wheel size).
+    pub wheel_size: WheelSize,
+}
+
+/// How many segments a wheel shows at once: 8, 10 or 12 (formats::WHEEL_SIZES). Any
+/// other number in the file counts as the default, 10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WheelSize(pub u8);
+
+impl Default for WheelSize {
+    fn default() -> Self {
+        WheelSize(formats::MAX_SEGMENTS as u8)
+    }
+}
+
+impl WheelSize {
+    pub fn segments(self) -> usize {
+        let n = usize::from(self.0);
+        if formats::WHEEL_SIZES.contains(&n) { n } else { formats::MAX_SEGMENTS }
+    }
 }
 
 /// The keys held with Shift that open a wheel: Shift alone, with Option (Alt on Windows
@@ -317,13 +341,28 @@ impl Transparency {
     }
 }
 
-pub fn key(kind: Kind, format: &str) -> String {
-    format!("{}:{format}", kind.key())
+/// A format in a Settings row, as the settings file names it: "image:avif".
+pub fn key(row: &str, format: &str) -> String {
+    format!("{row}:{format}")
 }
 
 impl Settings {
-    pub fn shows(&self, kind: Kind, format: &str) -> bool {
-        !self.hidden.contains(&key(kind, format))
+    /// Whether `format` is on the wheel for files of Settings row `row` (formats::row_of).
+    /// A format a row starts without (formats::off_unless_chosen) is on only once chosen.
+    pub fn shows(&self, row: &str, format: &str) -> bool {
+        let key = key(row, format);
+        if formats::off_unless_chosen(row, format) { self.shown.contains(&key) } else { !self.hidden.contains(&key) }
+    }
+
+    /// Puts `format` on the wheel for row `row`, or takes it off.
+    pub fn show(&mut self, row: &str, format: &str, on: bool) {
+        let key = key(row, format);
+        let (set, add) = if formats::off_unless_chosen(row, format) { (&mut self.shown, on) } else { (&mut self.hidden, !on) };
+        if add {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
     }
 }
 
@@ -518,13 +557,13 @@ mod tests {
         store
             .update(|s| {
                 s.save_to = SaveTo::Downloads;
-                s.hidden.insert(key(Kind::Image, "avif"));
+                s.hidden.insert(key("image", "avif"));
             })
             .unwrap();
         let again = Store::load(path.clone()).0.get();
         assert_eq!(again.save_to, SaveTo::Downloads);
-        assert!(!again.shows(Kind::Image, "avif"));
-        assert!(again.shows(Kind::Image, "png"));
+        assert!(!again.shows("image", "avif"));
+        assert!(again.shows("image", "png"));
 
         fs::write(&path, "not json").unwrap();
         let (store, problem) = Store::load(path.clone());
@@ -542,5 +581,33 @@ mod tests {
         let store = Store { path, current: Mutex::new(Settings::default()), locked: false };
         assert!(store.update(|s| s.save_to = SaveTo::Downloads).is_err());
         assert_eq!(store.get().save_to, SaveTo::NextToOriginal);
+    }
+
+    #[test]
+    fn the_wheel_size_defaults_to_ten() {
+        let old: Settings = serde_json::from_str(r#"{"save_to":"downloads","hidden":[]}"#).unwrap();
+        assert_eq!(old.wheel_size.segments(), 10);
+        let set: Settings = serde_json::from_str(r#"{"wheel_size":12}"#).unwrap();
+        assert_eq!(set.wheel_size.segments(), 12);
+        // A hand-edited file with a size the wheel doesn't offer: the default.
+        let odd: Settings = serde_json::from_str(r#"{"wheel_size":3}"#).unwrap();
+        assert_eq!(odd.wheel_size.segments(), 10);
+    }
+
+    #[test]
+    fn bmp_starts_off_for_other_pictures_only() {
+        let mut s = Settings::default();
+        assert!(!s.shows(formats::MORE_ROW, "bmp"));
+        assert!(s.shows(formats::MORE_ROW, "png") && s.shows("image", "bmp"));
+        s.show(formats::MORE_ROW, "bmp", true);
+        assert!(s.shows(formats::MORE_ROW, "bmp"));
+        assert!(s.shown.contains("image-more:bmp") && s.hidden.is_empty());
+        s.show(formats::MORE_ROW, "webp", false);
+        assert!(!s.shows(formats::MORE_ROW, "webp") && s.shows("image", "webp"));
+        s.show(formats::MORE_ROW, "bmp", false);
+        assert!(!s.shows(formats::MORE_ROW, "bmp") && s.shown.is_empty());
+        // A settings file from before the row: BMP still starts off there.
+        let old: Settings = serde_json::from_str(r#"{"hidden":["image:avif"]}"#).unwrap();
+        assert!(!old.shows(formats::MORE_ROW, "bmp") && old.shows(formats::MORE_ROW, "avif"));
     }
 }

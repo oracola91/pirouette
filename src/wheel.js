@@ -159,6 +159,71 @@ function sectorPath(i, n) {
   ].join(' ');
 }
 
+// More segments than ten (Settings > Wheel size 12) make them narrow: a label that would
+// run past its segment goes on two lines, then gets smaller, down to LABEL_FIT_MIN. Ten
+// or fewer keep the one size they always had.
+const ROOMY = 10;
+const LABEL_SIZE = 11.5;
+const LABEL_FIT_MIN = 8.5;
+
+// Whether a point lies in segment `i` of `n`, clear of its sides and rings.
+function inSegment(i, n, px, py) {
+  const dx = px - C;
+  const dy = C - py;
+  const r = Math.hypot(dx, dy);
+  if (r < R_IN + 3 || r > SEG_OUT - 3) return false;
+  let a = Math.atan2(dx, dy);
+  if (a < 0) a += 2 * Math.PI;
+  const a0 = (i / n) * 2 * Math.PI;
+  const a1 = ((i + 1) / n) * 2 * Math.PI;
+  const clear = GAP / 2 + 2;
+  return a >= a0 && a <= a1 && r * Math.sin(a - a0) >= clear && r * Math.sin(a1 - a) >= clear;
+}
+
+function labelFits(label, i, n) {
+  const b = label.getBBox();
+  return [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]].every(([px, py]) => inSegment(i, n, px, py));
+}
+
+// One label on one line, or on two broken at the space nearest the middle: centred
+// where one line was, or from there down for a label under an icon (`under`).
+function setLines(label, words, x, under, two) {
+  label.textContent = '';
+  const gaps = [...words.matchAll(/ /g)].map((m) => m.index);
+  if (!two || gaps.length === 0) {
+    label.textContent = words;
+    return;
+  }
+  const cut = gaps.reduce((best, at) => (Math.abs(at - words.length / 2) < Math.abs(best - words.length / 2) ? at : best));
+  const first = el('tspan', { x, dy: under ? '0' : '-0.55em' });
+  const second = el('tspan', { x, dy: '1.1em' });
+  first.textContent = words.slice(0, cut);
+  second.textContent = words.slice(cut + 1);
+  label.append(first, second);
+}
+
+// The size a label needs to fit its segment, on one line or two (`two` says which it
+// ended on). Through the style object: the CSP (style-src 'self') drops a style attribute.
+function fittedSize(l, n, size) {
+  for (const two of [false, true]) {
+    setLines(l.label, l.words, l.x, l.under, two);
+    l.label.style.fontSize = `${size}px`;
+    if (labelFits(l.label, l.i, n)) return true;
+  }
+  return false;
+}
+
+// Every label on a wheel of more than ten gets the one size the tightest of them needs,
+// so the wheel reads evenly; each then goes on two lines only if one doesn't fit.
+function fitLabels(labels, n) {
+  if (n <= ROOMY || labels.length === 0 || typeof labels[0].label.getBBox !== 'function') return;
+  let size = LABEL_SIZE;
+  for (const l of labels) {
+    while (size > LABEL_FIT_MIN && !fittedSize(l, n, size)) size -= 0.5;
+  }
+  for (const l of labels) fittedSize(l, n, size);
+}
+
 // "2.2 MB", the way Finder counts (1000 bytes to a kilobyte).
 function sizeText(n) {
   if (n < 1000) return `${n} bytes`;
@@ -223,6 +288,7 @@ function build() {
     el('circle', { cx: C, cy: C, r: R_OUT - 0.75, class: 'edge' }),
   );
   const n = formats.length;
+  const labels = [];
   segments = formats.map((f, i) => {
     const mid = n === 1 ? 0 : ((i + 0.5) / n) * 2 * Math.PI;
     const g = el('g', { class: 'seg' });
@@ -242,11 +308,14 @@ function build() {
       g.append(art);
     }
     const label = el('text', { x, y: icon ? y + 9 : y });
-    label.textContent = (Object.hasOwn(TOOLS, f) ? TOOLS[f][0] : f).toUpperCase();
+    const words = (Object.hasOwn(TOOLS, f) ? TOOLS[f][0] : f).toUpperCase();
+    label.textContent = words;
     g.append(label);
     svg.append(g);
+    labels.push({ label, words, i, x, under: icon !== null });
     return g;
   });
+  fitLabels(labels, n);
   hub = el('circle', { cx: C, cy: C, r: HUB_R, class: 'hub' });
   const hubShine = el('circle', { cx: C, cy: C, r: HUB_R, class: 'shine' });
   // The native file icon sits above the centre; the label goes under it, on a pill.

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::settings::{self, Combo, Highlight, Level, Quality, SaveTo, Store, Transparency};
+use crate::settings::{self, Combo, Highlight, Level, Quality, SaveTo, Store, Transparency, WheelSize};
 use crate::wheel::Which;
 use crate::{converters, formats, log, login, reveal};
 
@@ -50,6 +50,8 @@ struct FormatView {
 #[derive(Serialize)]
 struct KindView {
     label: &'static str,
+    /// What the row is for, when its name doesn't say.
+    note: Option<&'static str>,
     formats: Vec<FormatView>,
 }
 
@@ -115,6 +117,9 @@ pub struct View {
     hold: Option<bool>,
     /// macOS: whether Pages is installed, for Pages files. None elsewhere.
     pages: Option<bool>,
+    /// Most segments a wheel shows at once, and the sizes to pick from.
+    wheel_size: usize,
+    wheel_sizes: Vec<usize>,
 }
 
 /// One change from the page.
@@ -136,6 +141,8 @@ pub enum Change {
     Terminal { key: Option<String> },
     HideIcon { on: bool },
     Hold { on: bool },
+    /// Most segments a wheel shows at once: one of formats::WHEEL_SIZES.
+    WheelSize { segments: u8 },
 }
 
 fn system() -> &'static str {
@@ -165,12 +172,17 @@ fn hold_here() -> bool {
 fn view(app: &AppHandle) -> View {
     let s = app.state::<Store>().get();
     let terminals = crate::terminal::installed();
-    let kinds = formats::all()
-        .map(|(kind, outputs)| KindView {
-            label: kind.label(),
-            formats: outputs
+    let kinds = formats::rows()
+        .map(|row| KindView {
+            label: row.label,
+            note: (row.key == formats::MORE_ROW).then_some(
+                "PSD, TGA, JPEG XL, JPEG 2000, OpenEXR and other pictures the wheel reads but doesn't write. \
+                 More formats on than the wheel size shows come in a second set, with More.",
+            ),
+            formats: row
+                .outputs
                 .iter()
-                .map(|f| FormatView { key: settings::key(kind, f), label: f.to_uppercase(), shown: s.shows(kind, f) })
+                .map(|f| FormatView { key: settings::key(row.key, f), label: f.to_uppercase(), shown: s.shows(row.key, f) })
                 .collect(),
         })
         .collect();
@@ -210,12 +222,14 @@ fn view(app: &AppHandle) -> View {
         icon_hidden: s.hide_icon,
         hold: hold_here().then_some(s.hold_to_convert),
         pages: cfg!(target_os = "macos").then(crate::convert::pages_installed),
+        wheel_size: s.wheel_size.segments(),
+        wheel_sizes: formats::WHEEL_SIZES.to_vec(),
     }
 }
 
-/// A format key the wheel really has, such as "image:avif".
-fn known_format(key: &str) -> bool {
-    formats::all().any(|(kind, outputs)| outputs.iter().any(|f| settings::key(kind, f) == key))
+/// The Settings row and format a key names, such as "image:avif", if the wheel has it.
+fn known_format(key: &str) -> Option<(&'static str, &'static str)> {
+    formats::rows().find_map(|row| row.outputs.iter().find(|f| settings::key(row.key, f) == key).map(|f| (row.key, *f)))
 }
 
 /// What a change does to the saved settings.
@@ -234,17 +248,9 @@ fn edit(change: &Change) -> Result<Edit, String> {
             Box::new(move |s| s.shelf_off = off)
         }
         Change::Format { key, shown } => {
-            if !known_format(key) {
-                return Err(format!("no format {key} on the wheel"));
-            }
-            let (key, shown) = (key.clone(), *shown);
-            Box::new(move |s| {
-                if shown {
-                    s.hidden.remove(&key);
-                } else {
-                    s.hidden.insert(key);
-                }
-            })
+            let (row, format) = known_format(key).ok_or_else(|| format!("no format {key} on the wheel"))?;
+            let shown = *shown;
+            Box::new(move |s| s.show(row, format, shown))
         }
         Change::Keys { wheel, combo } => {
             let which = WHEELS.iter().find(|w| w.1 == wheel).map(|w| w.0).ok_or_else(|| format!("no wheel {wheel}"))?;
@@ -299,6 +305,13 @@ fn edit(change: &Change) -> Result<Edit, String> {
             let on = *on;
             Box::new(move |s| s.hide_icon = on)
         }
+        Change::WheelSize { segments } => {
+            if !formats::WHEEL_SIZES.contains(&usize::from(*segments)) {
+                return Err(format!("no wheel size {segments}"));
+            }
+            let size = WheelSize(*segments);
+            Box::new(move |s| s.wheel_size = size)
+        }
         Change::Hold { on } => {
             if !hold_here() {
                 return Err("Hold to Convert can't see a drag start on Wayland".into());
@@ -330,6 +343,7 @@ fn apply(app: &AppHandle, change: Change) -> Result<(), String> {
         Change::Hold { on } => crate::trigger::set_hold(on),
         // For Show Log: the next wheel should light up in this colour.
         Change::Highlight { .. } => log::line(&format!("highlight colour now {}", saved.highlight.key())),
+        Change::WheelSize { .. } => log::line(&format!("wheel size now {}", saved.wheel_size.segments())),
         #[cfg(windows)]
         Change::SendTo { .. } => {
             let handle = app.clone();
@@ -479,7 +493,16 @@ mod tests {
     }
 
     #[test]
+    fn bmp_comes_on_for_other_pictures() {
+        let on = changed(Change::Format { key: "image-more:bmp".into(), shown: true });
+        assert!(on.shown.contains("image-more:bmp") && on.hidden.is_empty());
+        let off = changed(Change::Format { key: "image-more:webp".into(), shown: false });
+        assert!(off.hidden.contains("image-more:webp"));
+    }
+
+    #[test]
     fn unknown_names_are_refused() {
+        assert!(edit(&Change::Format { key: "image-more:mp3".into(), shown: true }).is_err());
         assert!(edit(&Change::Format { key: "image:exe".into(), shown: false }).is_err());
         assert!(edit(&Change::Keys { wheel: "nope".into(), combo: None }).is_err());
         assert!(edit(&Change::Keys { wheel: "tools".into(), combo: Some("shift-cmd".into()) }).is_err());
@@ -501,6 +524,17 @@ mod tests {
         assert!(changed(c).hide_icon);
         let c: Change = serde_json::from_str(r#"{"what":"hold","on":true}"#).unwrap();
         assert!(changed(c).hold_to_convert);
+    }
+
+    #[test]
+    fn the_wheel_size_is_one_of_three() {
+        let c: Change = serde_json::from_str(r#"{"what":"wheel-size","segments":12}"#).unwrap();
+        assert_eq!(changed(c).wheel_size.segments(), 12);
+        let c: Change = serde_json::from_str(r#"{"what":"wheel-size","segments":8}"#).unwrap();
+        assert_eq!(changed(c).wheel_size.segments(), 8);
+        for n in [0, 9, 11, 13, 255] {
+            assert!(edit(&Change::WheelSize { segments: n }).is_err(), "{n}");
+        }
     }
 
     #[test]

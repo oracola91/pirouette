@@ -39,7 +39,12 @@ const VIDEO: Duration = Duration::from_secs(3600);
 /// The only containers ffmpeg may read: the ones the wheel accepts. Anything else, a
 /// playlist or concat list disguised as a video for example, is refused instead of
 /// being followed to other files or the network.
-const FFMPEG_FORMATS: &str = "mov,mp4,m4a,matroska,webm,avi,mp3,wav,flac,aiff,ogg,aac,asf,srt,webvtt";
+/// Never a playlist, concat list, image sequence or network stream: those read other
+/// files or addresses.
+const FFMPEG_FORMATS: &str = "mov,mp4,m4a,matroska,webm,avi,mp3,wav,flac,aiff,ogg,aac,asf,srt,webvtt,\
+     mpeg,mpegvideo,mpegts,flv,dv,mxf,rm,wtv,h264,hevc,dhav,bink,flic,\
+     ac3,eac3,amr,amrnb,amrwb,au,caf,dss,voc,wv,tta,w64,ape,mpc,mpc8,tak,dsf,iff,dts,\
+     ass,sami,lrc,microdvd,subviewer,subviewer1,scc";
 
 /// At most 1920 on the long side, and even sizes, which the video encoders need. For
 /// Compress, and for the old formats (AVI, WMV), whose players can't take 4K.
@@ -154,19 +159,21 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
     // Office files must really be what their name says. LibreOffice otherwise picks a
     // reader from the content: a broken .docx comes out as a PDF of its raw bytes, and
     // a web page saved as .doc is read as a web page.
-    let head = read_head(&input)?;
-    let expected: &[u8] = match ext.as_str() {
-        // Pages, Numbers and Keynote save a ZIP file too (an older package folder is
-        // refused above, as not a regular file).
-        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pages" | "numbers" | "key" => b"PK",
-        "doc" | "xls" | "ppt" => &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1],
-        "rtf" => b"{\\rtf",
-        "pdf" => b"%PDF-",
-        _ => b"",
-    };
-    if !head.starts_with(expected) {
+    // A Windows enhanced metafile's mark is at 40, a TAR's at 257.
+    let head = read_start(&input, 300)?;
+    if !office_mark_fits(&head, &ext) {
         return Err(format!("this is not a valid .{ext} file"));
     }
+
+    // JPEG 2000, JPEG XL, OpenEXR and icons on a Mac: the system decodes them to a TIFF
+    // first, converted from then on as that.
+    let (input, ext) = match (tool, kind) {
+        (None, Kind::Image) => match system_decoded(&input, work.path()).map_err(|e| redact(&e, src, work.path()))? {
+            Some(tiff) => (tiff, "tiff".to_string()),
+            None => (input, ext),
+        },
+        _ => (input, ext),
+    };
 
     let file = |done: Result<(), String>| done.map(|()| Output::File);
     let converted = match (tool, kind) {
@@ -216,8 +223,28 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
             libreoffice(&input, "pdf", &slides).and_then(|()| pdf(&slides, target, &out, &work))
         }
         (None, Kind::Sheet | Kind::Slides) => file(libreoffice(&input, target, &out)),
+        // Comics: MuPDF makes them a PDF first, a page per picture.
+        (None, Kind::Pdf) if formats::COMICS.contains(&ext.as_str()) => comic_to_pdf(&input, work.path()).and_then(|pages| {
+            if target == "pdf" {
+                fs::rename(&pages, &out).map(|()| Output::File).map_err(|e| format!("work folder: {e}"))
+            } else {
+                pdf(&pages, target, &out, &work)
+            }
+        }),
         (None, Kind::Pdf) => pdf(&input, target, &out, &work),
-        (None, Kind::Subtitles) if target == "txt" => file(subtitle_text(&input, &out)),
+        // Drawings: LibreOffice Draw writes PDF and SVG itself; a picture of each page
+        // is the PDF's pages drawn, as for slides.
+        (None, Kind::Drawing) if matches!(target, "jpg" | "png") => {
+            let pages = work.path().join("drawing.pdf");
+            libreoffice(&input, "pdf", &pages).and_then(|()| pdf(&pages, target, &out, &work))
+        }
+        (None, Kind::Drawing) => file(libreoffice(&input, target, &out)),
+        (None, Kind::Subtitles) if target == "txt" && matches!(ext.as_str(), "srt" | "vtt") => file(subtitle_text(&input, &out)),
+        // The other subtitle formats: SRT first (ffmpeg), then its words.
+        (None, Kind::Subtitles) if target == "txt" => {
+            let srt = work.path().join("words.srt");
+            file(ffmpeg(&input, &["-map", "0:s:0"], &srt, QUICK).and_then(|()| subtitle_text(&srt, &out)))
+        }
         (None, Kind::Subtitles) => file(ffmpeg(&input, &["-map", "0:s:0"], &out, QUICK)),
     };
     // Tool messages often start with a full path; keep only file names.
@@ -318,9 +345,254 @@ fn sniff_image(head: &[u8]) -> Option<&'static str> {
             b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some("heic"),
             _ => None,
         }
+    } else if at(0, b"8BPS\0\x01") {
+        Some("psd")
+    } else if at(0, b"8BPS\0\x02") {
+        Some("psb")
+    } else if at(0, b"\x8aMNG\r\n\x1a\n") {
+        Some("mng")
+    } else if at(0, b"qoif") {
+        Some("qoi")
+    } else if at(0, b"DDS ") {
+        Some("dds")
+    } else if at(0, b"/* XPM */") {
+        Some("xpm")
+    } else if at(0, &[0x59, 0xA6, 0x6A, 0x95]) {
+        Some("sun")
+    } else if at(0, &[0x01, 0xDA]) && head.get(2).is_some_and(|b| *b <= 1) && head.get(3).is_some_and(|b| matches!(b, 1 | 2)) {
+        Some("sgi")
+    } else if at(0, b"id=ImageMagick") {
+        Some("miff")
+    } else if at(0, b"#?RADIANCE") || at(0, b"#?RGBE") {
+        Some("hdr")
+    } else if at(0, b"SIMPLE  =") {
+        Some("fits")
+    } else if at(0, b"gimp xcf ") {
+        Some("xcf")
+    } else if at(128, b"DICM") {
+        Some("dcm")
+    } else if at(0, &[0x76, 0x2F, 0x31, 0x01]) {
+        Some("exr")
+    } else if at(0, b"\0\0\0\x0cjP  \r\n\x87\n") {
+        Some("jp2")
+    } else if at(0, &[0xFF, 0x4F, 0xFF, 0x51]) {
+        Some("j2k")
+    } else if at(0, &[0xFF, 0x0A]) || at(0, b"\0\0\0\x0cJXL \r\n\x87\n") {
+        Some("jxl")
+    } else if at(0, b"icns") {
+        Some("icns")
+    } else if head.first() == Some(&b'P') && head.get(2).is_some_and(u8::is_ascii_whitespace) {
+        // Netpbm: P1 and P4 black and white, P2 and P5 grey, P3 and P6 colour, P7 any,
+        // PF and Pf floating point.
+        match head.get(1)? {
+            b'1' | b'4' => Some("pbm"),
+            b'2' | b'5' => Some("pgm"),
+            b'3' | b'6' => Some("ppm"),
+            b'7' => Some("pam"),
+            b'F' | b'f' => Some("pfm"),
+            _ => None,
+        }
     } else {
         None
     }
+}
+
+/// A comic book archive (pictures in a ZIP or TAR) as a PDF in the work folder, a page
+/// per picture in name order (MuPDF).
+fn comic_to_pdf(src: &Path, work: &Path) -> Result<PathBuf, String> {
+    let pdf = work.join("comic.pdf");
+    let mut cmd = Command::new(tool("mutool")?);
+    cmd.args(["convert", "-F", "pdf", "-o"]).arg(&pdf).arg(src);
+    run(cmd, OFFICE)?;
+    if !pdf.is_file() {
+        return Err("MuPDF could not read this comic".into());
+    }
+    Ok(pdf)
+}
+
+/// Whether a file starts the way its office (or PDF) extension says. Any start fits
+/// the formats with no such check.
+fn office_mark_fits(head: &[u8], ext: &str) -> bool {
+    const OLE: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let marks: &[&[u8]] = match ext {
+        // Pages, Numbers and Keynote save a ZIP file too (an older package folder is
+        // refused above, as not a regular file). So do the Office and ODF templates and
+        // macro files.
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pages" | "numbers" | "key" | "docm" | "dotx" | "dotm"
+        | "ott" | "xlsm" | "xltx" | "ots" | "pptm" | "potx" | "potm" | "ppsx" | "otp" => &[b"PK"],
+        // Office 97 to 2003, its templates and shows, Works 4 and later, StarWriter.
+        "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot" | "pps" | "wps" | "sdw" => &[OLE],
+        "rtf" => &[b"{\\rtf"],
+        "pdf" => &[b"%PDF-"],
+        // Flat ODF and AbiWord are XML (AbiWord's may start at its own tag); compressed
+        // AbiWord is gzip.
+        "fodt" | "fods" | "fodp" => &[b"<?xml"],
+        "abw" => &[b"<?xml", b"<abiword"],
+        "zabw" => &[&[0x1F, 0x8B]],
+        "wpd" => &[b"\xFFWPC"],
+        "psw" => &[b"{\\pwi"],
+        // Windows Write: 0x31 or 0x32, then 0xBE 0 0.
+        "wri" => &[&[0x31, 0xBE, 0, 0], &[0x32, 0xBE, 0, 0]],
+        // Visio, Publisher: OLE; Visio 2013 and ODF drawings: ZIP. CorelDraw: RIFF, or
+        // ZIP from X4 on.
+        "vsd" | "pub" => &[OLE],
+        "vsdx" | "odg" => &[b"PK"],
+        "fodg" => &[b"<?xml"],
+        "cdr" => &[b"RIFF", b"PK"],
+        // Windows metafile: placeable, or plain in memory (1) or on disk (2).
+        "wmf" => &[&[0xD7, 0xCD, 0xC6, 0x9A], &[1, 0, 9, 0], &[2, 0, 9, 0]],
+        "emf" => return head.starts_with(&[1, 0, 0, 0]) && head.get(40..44) == Some(b" EMF"),
+        // CGM: binary, opening with Begin Metafile (class 0, element 1), or clear text.
+        "cgm" => {
+            let text = String::from_utf8_lossy(head).trim_start().to_ascii_uppercase();
+            return (head.first() == Some(&0) && head.get(1).is_some_and(|b| (0x20..=0x3F).contains(b))) || text.starts_with("BEGMF");
+        }
+        // DXF: text, its first group a 0 SECTION (a 999 comment may come first), or binary.
+        "dxf" => {
+            let text = String::from_utf8_lossy(head);
+            let mut lines = text.lines().map(str::trim);
+            let first = lines.next().unwrap_or_default();
+            return head.starts_with(b"AutoCAD Binary DXF") || first == "999" || (first == "0" && lines.next() == Some("SECTION"));
+        }
+        // Comics: a ZIP, or a TAR ("ustar" at 257).
+        "cbz" => &[b"PK"],
+        "cbt" => return head.get(257..262) == Some(b"ustar"),
+        _ => &[b""],
+    };
+    marks.iter().any(|m| head.starts_with(m))
+}
+
+/// The first bytes the picture readers look at: enough for DICOM's mark at 128 and
+/// Photo CD's at 2048.
+const PICTURE_HEAD: u64 = 2056;
+
+/// The ImageMagick reader for a picture: from its first bytes (sniff_image), or, for the
+/// formats with no clear mark of their own, from the extension once the header fits it.
+/// Naming the reader keeps ImageMagick from picking one itself, so a file can't pass
+/// for a script-like format (SVG, PostScript, MSL).
+fn picture_coder(head: &[u8], ext: &str) -> Option<&'static str> {
+    if let Some(coder) = sniff_image(head) {
+        return Some(coder);
+    }
+    let at = |i: usize, sig: &[u8]| head.get(i..i + sig.len()) == Some(sig);
+    let byte = |i: usize| head.get(i).copied();
+    match ext {
+        // Targa: a colour map flag of 0 or 1 and a known image type.
+        "tga" if head.len() >= 18 && byte(1) <= Some(1) && matches!(byte(2), Some(1 | 2 | 3 | 9 | 10 | 11 | 32 | 33)) => Some("tga"),
+        // Wireless bitmap: type 0, header byte 0.
+        "wbmp" if at(0, &[0, 0]) => Some("wbmp"),
+        // PC Paintbrush: its mark, a known version and run-length flag.
+        "pcx" if byte(0) == Some(0x0A) && matches!(byte(1), Some(0 | 2 | 3 | 4 | 5)) && byte(2) <= Some(1) => Some("pcx"),
+        "ico" if at(0, &[0, 0, 1, 0]) => Some("ico"),
+        "cur" if at(0, &[0, 0, 2, 0]) => Some("cur"),
+        "xbm" if at(0, b"#define") => Some("xbm"),
+        "pcd" if at(2048, b"PCD_IPI") || at(0, b"PCD_OPA") => Some("pcd"),
+        _ => None,
+    }
+}
+
+/// Pictures macOS reads with its own decoder (sips, as Preview does), which ImageMagick
+/// often can't: built without their libraries, or with no reader at all (icons).
+#[cfg(target_os = "macos")]
+const SYSTEM_DECODED: &[&str] = &["jp2", "j2k", "jxl", "exr", "icns"];
+
+/// What ImageMagick needs to be built with to read these: their own libraries.
+#[cfg(not(target_os = "macos"))]
+const NEEDS_LIBRARY: &[(&str, &str)] = &[("jp2", "JPEG 2000"), ("j2k", "JPEG 2000"), ("jxl", "JPEG XL"), ("exr", "OpenEXR")];
+
+/// A picture macOS decodes itself, as a TIFF in the work folder; None for any other
+/// picture, which ImageMagick reads as it is.
+fn system_decoded(src: &Path, work: &Path) -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let ext = formats::extension(src).unwrap_or_default();
+        let Some(coder) = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext) else {
+            return Ok(None);
+        };
+        if !SYSTEM_DECODED.contains(&coder) {
+            return Ok(None);
+        }
+        let tiff = work.join("decoded.tiff");
+        let mut cmd = Command::new("/usr/bin/sips");
+        cmd.args(["-s", "format", "tiff"]).arg(src).arg("--out").arg(&tiff);
+        run(cmd, QUICK)?;
+        if !tiff.is_file() {
+            return Err("macOS could not read this picture".into());
+        }
+        Ok(Some(tiff))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (src, work);
+        Ok(None)
+    }
+}
+
+/// How ImageMagick is told to read a picture: the reader and the frame, and what to do
+/// once read. GIMP files come as layers and are flattened; icons hold several sizes, of
+/// which the largest is taken; every frame is kept only for a multi-page or animated
+/// `target` from a format whose frames are pages or moments (a PSD's are its layers, a
+/// DDS's its smaller copies).
+fn picture_input(src: &Path, coder: &str, target: &str) -> Result<(String, Vec<&'static str>), String> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some((_, name)) = NEEDS_LIBRARY.iter().find(|(c, _)| *c == coder) {
+        if !magick_has(coder) {
+            return Err(format!("this ImageMagick can't read {name}: it was built without its library"));
+        }
+    }
+    let path = src.display();
+    Ok(match coder {
+        "xcf" => (format!("xcf:{path}"), vec!["-background", "none", "-layers", "flatten"]),
+        "ico" | "cur" => (format!("{coder}:{path}[{}]", largest_frame(src, coder)), Vec::new()),
+        "jpeg" | "png" | "gif" | "webp" | "tiff" | "bmp" | "heic" | "avif" | "mng" if matches!(target, "pdf" | "tiff" | "gif") => {
+            (format!("{coder}:{path}"), Vec::new())
+        }
+        _ => (format!("{coder}:{path}[0]"), Vec::new()),
+    })
+}
+
+/// The largest picture in an icon file, by its place in the file (0 when it can't be told).
+fn largest_frame(src: &Path, coder: &str) -> usize {
+    let Ok(magick) = magick() else { return 0 };
+    let mut cmd = Command::new(magick);
+    cmd.args(IMAGE_LIMITS).arg("-ping").arg(format!("{coder}:{}", src.display())).args(["-format", "%p %w %h\n", "info:"]);
+    cmd.stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    let Ok(out) = cmd.output() else { return 0 };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace().map(|n| n.parse::<u64>().ok());
+            Some((w.next()??, w.next()?? * w.next()??))
+        })
+        .max_by_key(|(_, area)| *area)
+        .map_or(0, |(i, _)| usize::try_from(i).unwrap_or(0))
+}
+
+/// Whether this ImageMagick has a reader for `coder`, from `magick -list format`.
+#[cfg(not(target_os = "macos"))]
+fn magick_has(coder: &str) -> bool {
+    let Ok(magick) = magick() else { return false };
+    let mut cmd = Command::new(magick);
+    cmd.args(["-list", "format"]).stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    cmd.output().is_ok_and(|out| {
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+            let mut w = l.split_whitespace();
+            let name = w.next().unwrap_or("").trim_end_matches('*');
+            // "JP2* JP2 rw-": the mode's first letter says it reads.
+            name.eq_ignore_ascii_case(coder) && w.nth(1).is_some_and(|mode| mode.starts_with('r'))
+        })
+    })
+}
+
+/// The first `n` bytes of a file (fewer if it is shorter).
+fn read_start(path: &Path, n: u64) -> Result<Vec<u8>, String> {
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .and_then(|f| f.take(n).read_to_end(&mut head))
+        .map_err(|e| format!("can't read the file: {e}"))?;
+    Ok(head)
 }
 
 /// Whether the start of a file fits its camera RAW extension: most are TIFF inside,
@@ -393,16 +665,17 @@ fn delegates_have_raw(version: &str) -> bool {
 fn image(src: &Path, target: &str, out: &Path) -> Result<(), String> {
     // Naming the real input format stops ImageMagick from picking a decoder itself.
     // The real format, not the extension, so a PNG saved as .jpg still converts.
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
-    // Multi-page outputs keep every frame; the rest take the first one.
-    let frame = if matches!(target, "pdf" | "tiff" | "gif") { "" } else { "[0]" };
+    let ext = formats::extension(src).unwrap_or_default();
+    let coder = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext).ok_or("this is not an image format the wheel can read")?;
+    let (input, after) = picture_input(src, coder, target)?;
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
-    cmd.arg(format!("{coder}:{}{frame}", src.display())).arg("-auto-orient");
+    cmd.arg(input).args(after).arg("-auto-orient");
     cmd.args(image_options(target, quality().pictures));
     cmd.arg(format!("{}:{}", out_coder(target), out.display()));
     run(cmd, QUICK).map_err(|e| {
-        if target == "pdf" && e.contains("not authorized") {
+        // Older ImageMagick says "not authorized", newer "not allowed by the security policy".
+        if target == "pdf" && (e.contains("not authorized") || e.contains("security policy")) {
             "this computer's ImageMagick security policy doesn't allow writing PDF (common on Ubuntu)".to_string()
         } else {
             e
@@ -414,13 +687,16 @@ fn image(src: &Path, target: &str, out: &Path) -> Result<(), String> {
 /// its style's longest side (2000 px, photos 1200), then this program traces them in a process of
 /// its own (svg.rs), under the usual time limit and Stop Converting.
 fn to_svg(src: &Path, out: &Path, work: &Path) -> Result<(), String> {
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
+    let ext = formats::extension(src).unwrap_or_default();
+    let coder = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext).ok_or("this is not an image format the wheel can read")?;
+    let (input, after) = picture_input(src, coder, "svg")?;
     let pixels = work.join("pixels.pam");
     let style = svg::Style::of_coder(coder);
     let side = style.max_side().to_string();
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
-    cmd.arg(format!("{coder}:{}[0]", src.display()))
+    cmd.arg(input)
+        .args(after)
         .args(["-auto-orient", "-resize", &format!("{side}x{side}>"), "-depth", "8"])
         .arg(format!("pam:{}", pixels.display()));
     run(cmd, QUICK)?;
@@ -1252,7 +1528,7 @@ fn video(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> 
     match target {
         // MP4, MOV and M4V usually hold the same streams, and Matroska nearly any: a fast
         // copy first.
-        "mp4" | "mov" if matches!(ext, "mp4" | "mov" | "m4v") && copy_streams(src, &["-movflags", "+faststart"], out) => Ok(()),
+        "mp4" | "mov" if matches!(formats::canonical(ext), "mp4" | "mov" | "m4v") && copy_streams(src, &["-movflags", "+faststart"], out) => Ok(()),
         "mkv" if copy_streams(src, &[], out) => Ok(()),
         "mp4" | "mov" | "mkv" | "webm" | "avi" | "wmv" => {
             let args = video_encode(target).ok_or_else(|| format!("video can't become .{target}"))?;
@@ -1279,7 +1555,7 @@ fn video(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> 
 /// files); pandoc is better at the plain formats (HTML, Markdown, text, EPUB).
 fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> Result<(), String> {
     let ext = formats::canonical(ext);
-    let office_in = matches!(ext, "docx" | "doc" | "odt" | "rtf" | "pages");
+    let office_in = matches!(ext, "docx" | "doc" | "odt" | "rtf" | "pages") || libreoffice_only(ext);
     match target {
         // A clipping's plain text to plain text, or an RTFD that is already Word: as it is.
         _ if ext == target => fs::copy(src, out).map(drop).map_err(|e| format!("work folder: {e}")),
@@ -1304,7 +1580,7 @@ fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> 
             pandoc(src, ext, "docx", &docx)?;
             libreoffice(&docx, target, out)
         }
-        _ if matches!(ext, "doc" | "rtf" | "pages") => {
+        _ if matches!(ext, "doc" | "rtf" | "pages") || libreoffice_only(ext) => {
             // pandoc can't read .doc or Pages, and reads RTF only in recent versions:
             // LibreOffice turns them into .docx first.
             let docx = work.path().join("intermediate.docx");
@@ -1315,9 +1591,21 @@ fn document(src: &Path, ext: &str, target: &str, out: &Path, work: &TempDir) -> 
     }
 }
 
+/// Word-processing files only LibreOffice reads: templates, macro files, flat ODF and
+/// older word processors. pandoc gets them as Word files from LibreOffice.
+fn libreoffice_only(ext: &str) -> bool {
+    matches!(ext, "docm" | "dotx" | "dotm" | "dot" | "ott" | "fodt" | "wpd" | "wps" | "abw" | "zabw" | "sdw" | "psw" | "wri")
+}
+
 fn pandoc(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String> {
     let reader = match ext {
         "md" | "txt" => "markdown",
+        "tex" | "latex" => "latex",
+        "adoc" | "asciidoc" => "asciidoc",
+        "typ" => "typst",
+        "wiki" | "mediawiki" => "mediawiki",
+        "dbk" | "docbook" => "docbook",
+        "xhtml" => "html",
         other => other,
     };
     let writer = match target {
@@ -1343,6 +1631,8 @@ fn pandoc(src: &Path, ext: &str, target: &str, out: &Path) -> Result<(), String>
             "this pandoc can't write that format in its sandbox (Ubuntu's and Debian's builds can't): \
              install pandoc from github.com/jgm/pandoc/releases"
                 .to_string()
+        } else if e.contains("Unknown input format") {
+            format!("this pandoc is too old to read .{ext} files: a newer one from github.com/jgm/pandoc/releases does")
         } else {
             e
         }
@@ -1361,8 +1651,24 @@ fn libreoffice(src: &Path, target: &str, out: &Path) -> Result<(), String> {
     harden_libreoffice(&profile)?;
     cmd.arg(format!("-env:UserInstallation={}", file_url(&profile)))
         .args(["--headless", "--norestore", "--nolockcheck"]);
-    // Text and CSV are read as exactly that, never sniffed as something richer.
+    // Text and CSV are read as exactly that, never sniffed as something richer; so are
+    // flat ODF and AbiWord, XML that could otherwise pass for a web page.
     match formats::extension(src).as_deref() {
+        Some("fodt") => {
+            cmd.arg("--infilter=OpenDocument Text Flat XML");
+        }
+        Some("fods") => {
+            cmd.arg("--infilter=OpenDocument Spreadsheet Flat XML");
+        }
+        Some("fodp") => {
+            cmd.arg("--infilter=OpenDocument Presentation Flat XML");
+        }
+        Some("fodg") => {
+            cmd.arg("--infilter=OpenDocument Drawing Flat XML");
+        }
+        Some("abw" | "zabw") => {
+            cmd.arg("--infilter=AbiWord");
+        }
         Some("txt") => {
             cmd.arg("--infilter=Text (encoded):UTF8");
         }
@@ -1370,7 +1676,7 @@ fn libreoffice(src: &Path, target: &str, out: &Path) -> Result<(), String> {
             cmd.arg("--infilter=CSV:44,34,76,1");
         }
         // Tab-separated: the same reader with a tab (9) between the fields.
-        Some("tsv") => {
+        Some("tsv" | "tab") => {
             cmd.arg("--infilter=CSV:9,34,76,1");
         }
         _ => {}
@@ -4327,6 +4633,13 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Pages in a PDF ImageMagick wrote: its "/Type /Page" objects.
+    fn pdf_pages(path: &Path) -> usize {
+        let pdf = fs::read(path).unwrap();
+        pdf.windows(11).filter(|w| *w == b"/Type /Page").count()
+            - pdf.windows(12).filter(|w| *w == b"/Type /Pages").count()
+    }
+
     fn picture_size(path: &Path) -> String {
         let out = Command::new(magick().unwrap()).arg(path).args(["-format", "%wx%h", "info:"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -5459,6 +5772,451 @@ mod tests {
         assert!(delegates_have_raw("Version: ImageMagick 7.1.2\nDelegates (built-in): bzlib heic jpeg lcms png raw tiff webp zlib\n"));
         assert!(!delegates_have_raw("Delegates (built-in): bzlib heic jpeg png tiff\n"));
         assert!(!delegates_have_raw("Delegates (built-in): bzlib rawish\n"));
+    }
+
+    /// Every picture format the Other pictures row reads, made by ImageMagick (or, on a
+    /// Mac, by the system for those it decodes), comes out as a PNG of the same size.
+    #[test]
+    fn other_pictures_convert() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: other pictures not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let made = work.path().join("made.png");
+        let mut make = Command::new(magick().unwrap());
+        make.args(["-size", "40x30", "gradient:red-blue"]).arg(&made);
+        assert!(make.status().unwrap().success());
+        // (extension, ImageMagick writer, size it comes back at)
+        let cases = [
+            ("psd", "psd", "40x30"), ("psb", "psb", "40x30"), ("tga", "tga", "40x30"), ("ppm", "ppm", "40x30"),
+            ("pgm", "pgm", "40x30"), ("pbm", "pbm", "40x30"), ("pnm", "pnm", "40x30"), ("pam", "pam", "40x30"),
+            ("pfm", "pfm", "40x30"), ("apng", "png", "40x30"), ("mng", "mng", "40x30"), ("qoi", "qoi", "40x30"),
+            ("dds", "dds", "40x30"), ("pcx", "pcx", "40x30"), ("xpm", "xpm", "40x30"), ("xbm", "xbm", "40x30"),
+            ("wbmp", "wbmp", "40x30"), ("sgi", "sgi", "40x30"), ("rgb", "sgi", "40x30"), ("ras", "sun", "40x30"),
+            ("sun", "sun", "40x30"), ("miff", "miff", "40x30"), ("hdr", "hdr", "40x30"), ("fits", "fits", "40x30"),
+            ("ico", "ico", "40x30"), ("jfif", "jpeg", "40x30"), ("dib", "bmp", "40x30"),
+        ];
+        let mut tested = Vec::new();
+        for (ext, coder, size) in cases {
+            // No space in the name: XBM keeps it as a C name inside the file.
+            let src = work.path().join(format!("picture_{ext}.{ext}"));
+            let mut write = Command::new(magick().unwrap());
+            write.arg(&made).arg(format!("{coder}:{}", src.display()));
+            if !write.status().unwrap().success() {
+                eprintln!("this ImageMagick can't write {coder}: .{ext} not tested");
+                continue;
+            }
+            let png = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(picture_size(&png), size, ".{ext}");
+            tested.push(ext);
+        }
+        // An icon with three sizes: the largest is taken.
+        let icon = work.path().join("sizes.ico");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).args(["-define", "icon:auto-resize=16,64,32"]).arg(format!("ico:{}", icon.display()));
+        assert!(write.status().unwrap().success());
+        assert_eq!(picture_size(&convert(&icon, "png", None, work.path()).unwrap()), "64x64");
+        // A cursor is an icon file with another mark.
+        let mut cur = fs::read(&icon).unwrap();
+        cur[2] = 2;
+        fs::write(work.path().join("pointer.cur"), &cur).unwrap();
+        assert_eq!(picture_size(&convert(&work.path().join("pointer.cur"), "png", None, work.path()).unwrap()), "64x64");
+        // A PSD's layers are not pages: one picture, even into a PDF.
+        let layered = work.path().join("layers.psd");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).args(["(", "-clone", "0", ")", "(", "-clone", "0", ")"]).arg(format!("psd:{}", layered.display()));
+        assert!(write.status().unwrap().success());
+        match convert(&layered, "pdf", None, work.path()) {
+            Ok(pdf) => assert_eq!(pdf_pages(&pdf), 1),
+            // Ubuntu's ImageMagick policy forbids writing PDF; the app says so.
+            Err(e) if e.contains("security policy doesn't allow writing PDF") => eprintln!("PSD to PDF not tested: {e}"),
+            Err(e) => panic!("PSD to PDF: {e}"),
+        }
+        // Photo CD: ImageMagick writes its fixed sizes; the first, 192x128, is read.
+        let pcd = work.path().join("scan.pcd");
+        let mut write = Command::new(magick().unwrap());
+        write.arg(&made).arg(format!("pcd:{}", pcd.display()));
+        if write.status().unwrap().success() {
+            assert_eq!(picture_size(&convert(&pcd, "png", None, work.path()).unwrap()), "192x128");
+            tested.push("pcd");
+        }
+        // DICOM and GIMP files, which ImageMagick reads but doesn't write: built here.
+        fs::write(work.path().join("scan.dcm"), dicom_grey(40, 30)).unwrap();
+        let png = convert(&work.path().join("scan.dcm"), "png", None, work.path()).unwrap();
+        assert_eq!(picture_size(&png), "40x30");
+        fs::write(work.path().join("art.xcf"), gimp_rgb(40, 30)).unwrap();
+        let png = convert(&work.path().join("art.xcf"), "jpg", None, work.path()).unwrap();
+        assert_eq!(picture_size(&png), "40x30");
+        eprintln!("other pictures tested: {} dcm xcf", tested.join(" "));
+        assert!(tested.len() >= 20, "{tested:?}");
+    }
+
+    /// A small grey DICOM file: preamble, DICM, file meta with the transfer syntax
+    /// (explicit VR, little endian), then the picture's size and pixels.
+    fn dicom_grey(w: u16, h: u16) -> Vec<u8> {
+        fn el(group: u16, elem: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+            let mut e = [group.to_le_bytes(), elem.to_le_bytes()].concat();
+            e.extend(vr);
+            if vr == b"OB" {
+                e.extend([0, 0]);
+                e.extend(u32::try_from(value.len()).unwrap().to_le_bytes());
+            } else {
+                e.extend(u16::try_from(value.len()).unwrap().to_le_bytes());
+            }
+            e.extend(value);
+            e
+        }
+        let meta = el(0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
+        let mut file = vec![0u8; 128];
+        file.extend(b"DICM");
+        file.extend(el(0x0002, 0x0000, b"UL", &u32::try_from(meta.len()).unwrap().to_le_bytes()));
+        file.extend(meta);
+        for (elem, value) in [(0x0002, 1u16), (0x0010, h), (0x0011, w), (0x0100, 8), (0x0101, 8), (0x0102, 7), (0x0103, 0)] {
+            if elem == 0x0010 {
+                file.extend(el(0x0028, 0x0004, b"CS", b"MONOCHROME2 "));
+            }
+            file.extend(el(0x0028, elem, b"US", &value.to_le_bytes()));
+        }
+        let pixels: Vec<u8> = (0..h).flat_map(|_| (0..w).map(|x| (x * 6 % 256) as u8)).collect();
+        file.extend(el(0x7FE0, 0x0010, b"OB", &pixels));
+        file
+    }
+
+    /// A small GIMP file (version 0): one visible RGB layer, its one tile uncompressed.
+    /// ImageMagick reads a last tile as up to 64 x 64 x 4 x 1.5 bytes, so the file runs on.
+    fn gimp_rgb(w: u32, h: u32) -> Vec<u8> {
+        let be = |n: u32| n.to_be_bytes().to_vec();
+        let mut file = b"gimp xcf file\0".to_vec();
+        for n in [w, h, 0, 0, 0] {
+            file.extend(be(n));
+        }
+        let layer_at = u32::try_from(file.len()).unwrap() + 12;
+        file.extend([be(layer_at), be(0), be(0)].concat());
+        // Size, RGB, name, then opacity 255 and visible, as GIMP writes them.
+        for n in [w, h, 0, 6] {
+            file.extend(be(n));
+        }
+        file.extend(b"Layer\0");
+        for n in [6, 4, 255, 8, 4, 1, 0, 0] {
+            file.extend(be(n));
+        }
+        let hierarchy_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(hierarchy_at), be(0), be(w), be(h), be(3)].concat());
+        let level_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(level_at), be(0), be(w), be(h)].concat());
+        let tile_at = u32::try_from(file.len()).unwrap() + 8;
+        file.extend([be(tile_at), be(0)].concat());
+        for y in 0..h {
+            for x in 0..w {
+                file.extend([(x * 6 % 256) as u8, (y * 8 % 256) as u8, 128]);
+            }
+        }
+        file.extend(vec![0u8; 40_000]);
+        file
+    }
+
+    /// What ffprobe finds in a file: a picture stream, a sound stream, and its length.
+    fn media_streams(path: &Path) -> (bool, bool, f64) {
+        let out = Command::new(tool("ffprobe").unwrap())
+            .args(["-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "default=nw=1"])
+            .arg(path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let seconds = text.lines().find_map(|l| l.strip_prefix("duration=")).and_then(|d| d.parse().ok()).unwrap_or(0.0);
+        (text.contains("codec_type=video"), text.contains("codec_type=audio"), seconds)
+    }
+
+    /// Every new video and sound container ffmpeg here can write: made from a second of
+    /// test picture and tone, converted, and the result checked for its streams.
+    #[test]
+    fn more_video_and_sound_containers_convert() {
+        if tool("ffmpeg").is_err() || tool("ffprobe").is_err() {
+            eprintln!("ffmpeg isn't installed: containers not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let picture = ["-f", "lavfi", "-i", "testsrc=size=176x144:rate=25:duration=1"];
+        let tone = ["-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=48000"];
+        // (extension, muxer and codecs; picture and sound, or sound only)
+        let video: &[(&str, &[&str])] = &[
+            ("mpg", &["-c:v", "mpeg1video", "-c:a", "mp2", "-f", "mpeg"]),
+            ("mpeg", &["-c:v", "mpeg1video", "-c:a", "mp2", "-f", "mpeg"]),
+            ("vob", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "vob"]),
+            ("mod", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "vob"]),
+            ("ts", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "mpegts"]),
+            ("mts", &["-c:v", "libx264", "-c:a", "ac3", "-f", "mpegts", "-mpegts_m2ts_mode", "1"]),
+            ("m2ts", &["-c:v", "libx264", "-c:a", "ac3", "-f", "mpegts", "-mpegts_m2ts_mode", "1"]),
+            ("3gp", &["-c:v", "libx264", "-c:a", "aac", "-f", "3gp"]),
+            ("3g2", &["-c:v", "libx264", "-c:a", "aac", "-f", "3g2"]),
+            ("ogv", &["-c:v", "libvpx", "-c:a", "libopus", "-f", "ogg"]),
+            ("flv", &["-c:v", "flv1", "-c:a", "aac", "-f", "flv"]),
+            ("f4v", &["-c:v", "libx264", "-c:a", "aac", "-f", "f4v"]),
+            ("mxf", &["-c:v", "mpeg2video", "-c:a", "pcm_s16le", "-f", "mxf"]),
+            ("divx", &["-c:v", "mpeg4", "-c:a", "libmp3lame", "-f", "avi"]),
+            ("asf", &["-c:v", "wmv2", "-c:a", "wmav2", "-f", "asf"]),
+            ("dvr-ms", &["-c:v", "wmv2", "-c:a", "wmav2", "-f", "asf"]),
+            ("qt", &["-c:v", "libx264", "-c:a", "aac", "-f", "mov"]),
+            ("rm", &["-c:v", "rv20", "-c:a", "ac3", "-f", "rm"]),
+            ("wtv", &["-c:v", "mpeg2video", "-c:a", "mp2", "-f", "wtv"]),
+            // DV: PAL size and stereo sound, the only kind it holds.
+            ("dv", &["-c:v", "dvvideo", "-s", "720x576", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ac", "2", "-f", "dv"]),
+            ("m2v", &["-an", "-c:v", "mpeg2video", "-f", "mpeg2video"]),
+            ("h264", &["-an", "-c:v", "libx264", "-f", "h264"]),
+            ("hevc", &["-an", "-c:v", "libx265", "-f", "hevc"]),
+        ];
+        let sound: &[(&str, &[&str])] = &[
+            ("m4b", &["-c:a", "aac", "-f", "ipod"]),
+            ("m4r", &["-c:a", "aac", "-f", "ipod"]),
+            ("wave", &["-c:a", "pcm_s16le", "-f", "wav"]),
+            ("oga", &["-c:a", "flac", "-f", "ogg"]),
+            ("aifc", &["-c:a", "pcm_alaw", "-f", "aiff"]),
+            ("ac3", &["-c:a", "ac3", "-f", "ac3"]),
+            ("eac3", &["-c:a", "eac3", "-f", "eac3"]),
+            ("au", &["-c:a", "pcm_s16be", "-f", "au"]),
+            ("caf", &["-c:a", "pcm_s16le", "-f", "caf"]),
+            ("weba", &["-c:a", "libopus", "-f", "webm"]),
+            ("mka", &["-c:a", "flac", "-f", "matroska"]),
+            ("mp2", &["-c:a", "mp2", "-f", "mp2"]),
+            ("voc", &["-c:a", "pcm_u8", "-f", "voc"]),
+            ("wv", &["-c:a", "wavpack", "-f", "wv"]),
+            ("tta", &["-c:a", "tta", "-f", "tta"]),
+            ("w64", &["-c:a", "pcm_s16le", "-f", "w64"]),
+            ("dts", &["-c:a", "dca", "-strict", "-2", "-f", "dts"]),
+        ];
+        let mut tested = Vec::new();
+        for (ext, muxer, has_sound) in video.iter().map(|(e, m)| (e, m, !m.contains(&"-an"))).chain(sound.iter().map(|(e, m)| (e, m, true))) {
+            let picture_too = video.iter().any(|(e, _)| e == ext);
+            let src = work.path().join(format!("clip {ext}.{ext}"));
+            let mut make = Command::new(tool("ffmpeg").unwrap());
+            make.args(["-v", "error", "-y"]);
+            if picture_too {
+                make.args(picture);
+            }
+            if has_sound {
+                make.args(tone);
+            }
+            make.args(["-t", "1"]).args(*muxer).arg(&src).stdin(Stdio::null());
+            if !make.status().unwrap().success() || !src.is_file() {
+                eprintln!("this ffmpeg can't write .{ext}: not tested");
+                continue;
+            }
+            let target = if picture_too { "mp4" } else { "mp3" };
+            let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            let (picture_out, sound_out, seconds) = media_streams(&out);
+            assert_eq!((picture_out, sound_out), (picture_too, has_sound), ".{ext}");
+            assert!((0.7..1.4).contains(&seconds), ".{ext}: {seconds} s");
+            tested.push(*ext);
+        }
+        eprintln!("containers tested: {}", tested.join(" "));
+        assert!(tested.len() >= 25, "{tested:?}");
+    }
+
+    /// Each subtitle format the wheel reads becomes SRT, WebVTT and text with its words.
+    #[test]
+    fn more_subtitle_formats_convert() {
+        if tool("ffmpeg").is_err() {
+            eprintln!("ffmpeg isn't installed: subtitles not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let samples: &[(&str, &str)] = &[
+            ("ass", "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Default,Arial,20\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,{\\i1}Hello there{\\i0}\n"),
+            ("ssa", "[Script Info]\nScriptType: v4.00\n\n[V4 Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Default,Arial,20\n\n[Events]\nFormat: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: Marked=0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Hello there\n"),
+            ("smi", "<SAMI>\n<BODY>\n<SYNC Start=1000><P Class=ENCC>Hello there\n<SYNC Start=2500><P Class=ENCC>&nbsp;\n</BODY>\n</SAMI>\n"),
+            ("lrc", "[ti:Song]\n[00:01.00]Hello there\n[00:02.50]\n"),
+            // ffmpeg knows MicroDVD by three cue lines in a row.
+            ("sub", "{25}{62}Hello there\n{75}{100}Second line\n{125}{150}Third line\n"),
+            // Captions: "Hello there" in CEA-608 pop-on codes at one second.
+            ("scc", "Scenarist_SCC V1.0\n\n00:00:01:00\t9420 9420 94ae 94ae 9452 9452 c8e5 ecec ef20 f468 e5f2 e580 942f 942f\n\n00:00:02:15\t942c 942c\n"),
+        ];
+        for (ext, text) in samples {
+            let src = work.path().join(format!("words_{ext}.{ext}"));
+            fs::write(&src, text).unwrap();
+            for target in ["srt", "vtt", "txt"] {
+                let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext} to {target}: {e}"));
+                let got = fs::read_to_string(&out).unwrap();
+                assert!(got.to_lowercase().contains("hello there"), ".{ext} to {target}: {got:?}");
+                if target == "txt" {
+                    assert!(!got.contains("-->") && !got.contains("{\\i1}"), ".{ext} to txt: {got:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn office_files_must_start_as_their_format() {
+        let ole = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        for ext in ["docm", "dotx", "xlsm", "potx", "ppsx", "otp"] {
+            assert!(office_mark_fits(b"PK\x03\x04", ext), "{ext}");
+            assert!(!office_mark_fits(b"<html>", ext), "{ext}");
+        }
+        for ext in ["dot", "xlt", "pot", "pps", "wps", "sdw"] {
+            assert!(office_mark_fits(&ole, ext), "{ext}");
+            assert!(!office_mark_fits(b"PK\x03\x04", ext), "{ext}");
+        }
+        assert!(office_mark_fits(b"<?xml version", "fodt") && !office_mark_fits(b"<html>", "fodt"));
+        assert!(office_mark_fits(b"<abiword", "abw") && !office_mark_fits(b"<!DOCTYPE html", "abw"));
+        assert!(office_mark_fits(&[0x1F, 0x8B, 8], "zabw") && !office_mark_fits(b"<?xml", "zabw"));
+        assert!(office_mark_fits(b"\xFFWPC\x10", "wpd") && !office_mark_fits(b"WPC", "wpd"));
+        assert!(office_mark_fits(b"{\\pwi\x15", "psw") && !office_mark_fits(b"{\\rtf1", "psw"));
+        assert!(office_mark_fits(&[0x32, 0xBE, 0, 0, 0], "wri") && !office_mark_fits(&[0x33, 0xBE, 0, 0], "wri"));
+        let mut emf = vec![1, 0, 0, 0];
+        emf.resize(40, 0);
+        emf.extend(b" EMF");
+        assert!(office_mark_fits(&emf, "emf") && !office_mark_fits(&[1, 0, 0, 0], "emf"));
+        assert!(office_mark_fits(&[0xD7, 0xCD, 0xC6, 0x9A], "wmf") && !office_mark_fits(b"<svg", "wmf"));
+        assert!(office_mark_fits(&[0, 0x34, 0x13], "cgm") && office_mark_fits(b" BEGMF 'x';", "cgm"));
+        assert!(!office_mark_fits(b"%!PS", "cgm"));
+        assert!(office_mark_fits(b"  0\nSECTION\n  2\nHEADER", "dxf") && office_mark_fits(b"999\nmade by\n  0\n", "dxf"));
+        assert!(!office_mark_fits(b"<html>", "dxf") && !office_mark_fits(b"  0\nEOF", "dxf"));
+        assert!(office_mark_fits(b"RIFF\0\0\0\0CDR", "cdr") && office_mark_fits(&ole, "vsd") && !office_mark_fits(b"PK", "vsd"));
+        // Formats with no mark to check: anything goes on to their reader.
+        assert!(office_mark_fits(b"anything", "rst"));
+    }
+
+    /// Each text format pandoc reads, written by pandoc itself from a small Markdown
+    /// file, comes back as Markdown and plain text with its words.
+    #[test]
+    fn pandoc_text_formats_convert() {
+        let Ok(pandoc) = tool("pandoc") else {
+            eprintln!("pandoc isn't installed: text formats not tested");
+            return;
+        };
+        let readers = Command::new(&pandoc).arg("--list-input-formats").output().unwrap();
+        let readers = String::from_utf8_lossy(&readers.stdout).to_string();
+        let work = tempfile::tempdir().unwrap();
+        let md = work.path().join("base.md");
+        fs::write(&md, "# Report\n\nHello there from the test.\n").unwrap();
+        // (extension, pandoc's writer for the sample, its reader for the app)
+        let cases = [
+            ("rst", "rst", "rst"), ("tex", "latex", "latex"), ("latex", "latex", "latex"), ("org", "org", "org"),
+            ("adoc", "asciidoc", "asciidoc"), ("typ", "typst", "typst"), ("wiki", "mediawiki", "mediawiki"),
+            ("dbk", "docbook", "docbook"), ("ipynb", "ipynb", "ipynb"), ("textile", "textile", "textile"),
+            ("man", "man", "man"), ("opml", "opml", "opml"), ("xhtml", "html", "html"), ("fb2", "fb2", "fb2"),
+        ];
+        let mut tested = Vec::new();
+        for (ext, writer, reader) in cases {
+            if !readers.lines().any(|l| l == reader) {
+                eprintln!("this pandoc can't read {reader}: .{ext} not tested");
+                continue;
+            }
+            let src = work.path().join(format!("doc_{ext}.{ext}"));
+            let made = Command::new(&pandoc).args(["-s", "-f", "markdown", "-t", writer, "-o"]).arg(&src).arg(&md).status().unwrap();
+            assert!(made.success(), "pandoc can't write {writer}");
+            for target in ["md", "txt"] {
+                let out = convert(&src, target, None, work.path()).unwrap_or_else(|e| panic!(".{ext} to {target}: {e}"));
+                let got = fs::read_to_string(&out).unwrap();
+                assert!(got.contains("Hello there"), ".{ext} to {target}: {got:?}");
+            }
+            tested.push(ext);
+        }
+        eprintln!("text formats tested: {}", tested.join(" "));
+    }
+
+    /// A comic of three pictures, as a ZIP and as a TAR, becomes a three-page PDF and a
+    /// folder of three pictures.
+    #[test]
+    fn comics_become_pages() {
+        if magick().is_err() || tool("mutool").is_err() {
+            eprintln!("ImageMagick or MuPDF isn't installed: comics not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let pages = work.path().join("pages");
+        fs::create_dir(&pages).unwrap();
+        for i in 1..=3 {
+            let mut make = Command::new(magick().unwrap());
+            make.args(["-size", "60x80", &format!("xc:#{}0{}0{}0", i * 3, i * 2, i)]).arg(pages.join(format!("page{i}.png")));
+            assert!(make.status().unwrap().success());
+        }
+        let names = ["page1.png", "page2.png", "page3.png"];
+        let tar = Command::new("tar").current_dir(&pages).args(["cf", "../comic.cbt"]).args(names).status().unwrap();
+        assert!(tar.success());
+        let mut cbz = fs::File::create(work.path().join("comic.cbz")).unwrap();
+        let files: Vec<_> = names.iter().map(|n| (n.to_string(), fs::read(pages.join(n)).unwrap())).collect();
+        sheet::write_zip(&mut cbz, &files).unwrap();
+        for comic in ["comic.cbz", "comic.cbt"] {
+            let src = work.path().join(comic);
+            let pdf = convert(&src, "pdf", None, work.path()).unwrap_or_else(|e| panic!("{comic}: {e}"));
+            let count = Mutool { path: tool("mutool").unwrap(), src: &pdf, deadline: Instant::now() + PDF_TOTAL }.page_count(work.path()).unwrap();
+            assert_eq!(count, 3, "{comic}");
+            fs::remove_file(&pdf).unwrap();
+            let folder = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!("{comic}: {e}"));
+            assert_eq!(fs::read_dir(&folder).unwrap().count(), 3, "{comic}");
+            fs::remove_dir_all(&folder).unwrap();
+        }
+        // A TAR that isn't one: refused before MuPDF sees it.
+        fs::write(work.path().join("fake.cbt"), b"not a tar").unwrap();
+        assert_eq!(convert(&work.path().join("fake.cbt"), "pdf", None, work.path()).unwrap_err(), "this is not a valid .cbt file");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_decodes_jpeg_2000_openexr_and_icons() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: system-decoded pictures not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let made = work.path().join("made.png");
+        let mut make = Command::new(magick().unwrap());
+        // 128 px: the least sips writes an icon file from.
+        make.args(["-size", "128x128", "gradient:red-blue"]).arg(&made);
+        assert!(make.status().unwrap().success());
+        // A bare JPEG 2000 codestream, from ffmpeg's own encoder when it is here.
+        if let Ok(ffmpeg) = tool("ffmpeg") {
+            let j2k = work.path().join("picture.j2k");
+            let mut make = Command::new(ffmpeg);
+            make.args(["-v", "error", "-i"]).arg(&made).args(["-c:v", "jpeg2000", "-format", "j2k", "-f", "image2"]).arg(&j2k);
+            if make.status().unwrap().success() {
+                assert_eq!(&fs::read(&j2k).unwrap()[..4], [0xFF, 0x4F, 0xFF, 0x51]);
+                assert_eq!(picture_size(&convert(&j2k, "png", None, work.path()).unwrap()), "128x128");
+            }
+        }
+        for (ext, uti) in [("jp2", "public.jpeg-2000"), ("exr", "com.ilm.openexr-image"), ("icns", "com.apple.icns")] {
+            let src = work.path().join(format!("picture.{ext}"));
+            let mut sips = Command::new("/usr/bin/sips");
+            sips.args(["-s", "format", uti]).arg(&made).arg("--out").arg(&src).stdout(Stdio::null());
+            assert!(sips.status().unwrap().success(), "sips can't write .{ext}");
+            let png = convert(&src, "png", None, work.path()).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(picture_size(&png), "128x128", ".{ext}");
+        }
+    }
+
+    #[test]
+    fn pictures_are_read_by_their_marks() {
+        let mut dcm = vec![0u8; 132];
+        dcm[128..].copy_from_slice(b"DICM");
+        for (head, ext, coder) in [
+            (b"8BPS\0\x01\0\0".to_vec(), "psd", Some("psd")),
+            (b"8BPS\0\x02\0\0".to_vec(), "psb", Some("psb")),
+            (b"qoif\0\0".to_vec(), "qoi", Some("qoi")),
+            (b"P6\n40 30\n".to_vec(), "ppm", Some("ppm")),
+            (b"P4 1 1\n".to_vec(), "pbm", Some("pbm")),
+            (b"Pf\n1 1\n".to_vec(), "pfm", Some("pfm")),
+            (b"P9\n".to_vec(), "ppm", None),
+            (dcm, "dcm", Some("dcm")),
+            (b"gimp xcf v011\0".to_vec(), "xcf", Some("xcf")),
+            (b"\0\0\0\x0cjP  \r\n\x87\n".to_vec(), "jp2", Some("jp2")),
+            (vec![0xFF, 0x0A, 0, 0], "jxl", Some("jxl")),
+            // No mark of their own: right only under their own name.
+            (vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 30, 0, 24, 0], "tga", Some("tga")),
+            (vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 30, 0, 24, 0], "cur", Some("cur")),
+            (vec![0, 0, 1, 0, 1, 0], "tga", None),
+            (vec![0, 0, 1, 0, 1, 0], "ico", Some("ico")),
+            (vec![0x0A, 5, 1, 8], "pcx", Some("pcx")),
+            (vec![0x0A, 9, 1, 8], "pcx", None),
+            (b"#define a_width 1\n".to_vec(), "xbm", Some("xbm")),
+            (b"#define a_width 1\n".to_vec(), "h", None),
+            // A script-like file never gets a reader.
+            (b"<svg xmlns=".to_vec(), "tga", None),
+            (b"%!PS-Adobe-3.0".to_vec(), "pcx", None),
+            (b"push graphic-context".to_vec(), "wbmp", None),
+        ] {
+            assert_eq!(picture_coder(&head, ext), coder, ".{ext} {head:?}");
+        }
     }
 
     /// macOS decodes camera RAW itself (sips). A TIFF named .dng stands in for one:

@@ -269,7 +269,7 @@ fn items_for(app: &AppHandle, paths: &[String], which: Which) -> Vec<&'static st
     match which {
         Which::Formats => {
             let settings = app.state::<crate::settings::Store>().get();
-            formats::formats_for(paths, |kind, f| settings.shows(kind, f))
+            formats::formats_for(paths, |row, f| settings.shows(row, f))
         }
         Which::Tools => formats::tools_for(paths),
         Which::Actions => formats::actions_for(paths),
@@ -432,7 +432,7 @@ fn fill(app: &AppHandle, paths: &[String], which: Option<Which>) -> (Which, Vec<
         *current = which;
     }
     let all = items_for(app, paths, *current);
-    let formats = wheel::page_of(&all, 0, formats::MAX_SEGMENTS);
+    let formats = wheel::page_of(&all, 0, wheel_size(app));
     *wheel::lock(&state.all) = all;
     *wheel::lock(&state.page) = 0;
     *wheel::lock(&state.formats) = formats.clone();
@@ -583,14 +583,15 @@ fn turn_page(app: &AppHandle, forward: bool) {
     let (which, formats, paths) = {
         let current = wheel::lock(&state.which);
         let all = wheel::lock(&state.all);
-        if wheel::pages(all.len(), formats::MAX_SEGMENTS) == 1 {
+        let size = wheel_size(app);
+        if wheel::pages(all.len(), size) == 1 {
             return;
         }
         let mut page = wheel::lock(&state.page);
-        let pages = wheel::pages(all.len(), formats::MAX_SEGMENTS);
+        let pages = wheel::pages(all.len(), size);
         *page = if forward { (*page + 1) % pages } else { (*page + pages - 1) % pages };
         *wheel::lock(&state.picked) = None;
-        let formats = wheel::page_of(&all, *page, formats::MAX_SEGMENTS);
+        let formats = wheel::page_of(&all, *page, size);
         *wheel::lock(&state.formats) = formats.clone();
         (*current, formats, wheel::lock(&state.paths).clone())
     };
@@ -598,6 +599,11 @@ fn turn_page(app: &AppHandle, forward: bool) {
     let bytes = total_bytes(&paths);
     let _ = app.emit("wheel-formats", WheelShow { paths, formats, pending, glass: false, pinned: false, wheel: which, bytes, highlight: None, look: None });
     crate::estimates::ask(app);
+}
+
+/// Most segments a wheel shows at once, from Settings > Wheel > Wheel size.
+fn wheel_size(app: &AppHandle) -> usize {
+    app.state::<crate::settings::Store>().get().wheel_size.segments()
 }
 
 /// Opens the wheel and returns its generation.
