@@ -56,7 +56,9 @@ A notification says when a drop is done or why it failed, and how the size chang
 
 ## The Tools wheel
 
-Hold Option as well as Shift while dragging (Alt+Shift on Windows and on Linux with X11) and a second wheel opens: what can be done to the file while it keeps its format. The result goes next to the original, named after the tool ("photo (half size).jpg"), and never replaces it. For pictures (JPEG, PNG, HEIC, WebP, AVIF and TIFF; BMP gets Half Size and Rotate only; animated GIFs none):
+Hold Option as well as Shift while dragging (Alt+Shift on Windows and on Linux with X11) and a second wheel opens: what can be done to the file while it keeps its format.
+
+Pictures, videos and sound the wheel reads but doesn't write (a Photoshop or GIMP file, a Targa, JPEG 2000 or OpenEXR picture; a camcorder's MTS, a DVD's VOB, a 3GP; an AC3, DTS, AMR, WavPack or APE track) can't keep their format, so their result is a PNG, an MP4, or for sound a FLAC (from a lossless file, so nothing is lost) or an M4A. They get the tools that write the result anew. Pictures: Half size, Resize, Rotate, Flip, QR code, Adjust, Mark up, Crop, One PDF and Collage. Videos: Compress, Resize, Flip, Crop, Black out, Trim, Speed, First frame and Snapshot. Sound: Trim, Bleep, Speed, Loudness and Mono. The tools that copy a file's streams as they are (Remove metadata, Mute, Split, Join), use a format's own settings (Compress for pictures and sound, To a size) or edit its tags (Info) stay with the formats the wheel writes. Camera RAW photos get no tools: they are developed first, and only converted. The result goes next to the original, named after the tool ("photo (half size).jpg"), and never replaces it. For pictures (JPEG, PNG, HEIC, WebP, AVIF and TIFF; BMP gets Half Size and Rotate only; animated GIFs none):
 
 - **Compress**: JPEG at quality 70; WebP and AVIF at 55, HEIC at 45 (its numbers run higher); PNG down to 256 colours (dithered); TIFF with lossless ZIP. A result that isn't smaller is not saved, and the notification says so.
 - **Half size**: half the width and height.
