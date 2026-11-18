@@ -3915,8 +3915,69 @@ pub fn page_pictures(src: &Path) -> Result<Vec<Vec<u8>>, String> {
     }
 }
 
+/// ImageMagick for a conversion or a tool: found, and on macOS and Windows new enough
+/// (MAGICK_MIN).
 fn magick() -> Result<PathBuf, String> {
+    let path = magick_path()?;
+    if !cfg!(target_os = "linux") {
+        check_magick_version(&path)?;
+    }
+    Ok(path)
+}
+
+/// Where ImageMagick is, whatever its version: for "is it installed", so an old one is
+/// still found by Update Converters.
+fn magick_path() -> Result<PathBuf, String> {
     tool("magick").or_else(|e| if cfg!(target_os = "linux") { tool("convert").map_err(|_| e) } else { Err(e) })
+}
+
+/// ImageMagick reads every picture the wheel is given, often from mail or the web, so
+/// an old one is a risk. The floor is the release that fixed the newest High or Critical
+/// advisory (github.com/ImageMagick/ImageMagick/security/advisories): 7.1.2-33 fixed a
+/// stack buffer overwrite when reading bzip2-compressed images (2026-10-10). Raise it
+/// when a newer High or Critical fix comes out and Homebrew and winget have it. Linux
+/// is left out: distributions patch their ImageMagick without changing its version, so
+/// the number says nothing there.
+const MAGICK_MIN: (u32, u32, u32, u32) = (7, 1, 2, 33);
+
+/// Refuses an ImageMagick older than MAGICK_MIN, or one whose version can't be read.
+/// Asked once a run when it passes; an old one is asked again, so an update counts
+/// without a restart.
+fn check_magick_version(magick: &Path) -> Result<(), String> {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    if CHECKED.get().is_some() {
+        return Ok(());
+    }
+    let mut cmd = Command::new(magick);
+    cmd.arg("-version").stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    let out = cmd.output().map_err(|e| format!("could not start ImageMagick: {e}"))?;
+    let first = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_string();
+    let version = parse_magick_version(&first).ok_or("can't tell which ImageMagick version is installed")?;
+    magick_new_enough(version)?;
+    let _ = CHECKED.set(());
+    Ok(())
+}
+
+fn magick_new_enough(version: (u32, u32, u32, u32)) -> Result<(), String> {
+    if version < MAGICK_MIN {
+        let show = |(a, b, c, d): (u32, u32, u32, u32)| format!("{a}.{b}.{c}-{d}");
+        return Err(format!(
+            "ImageMagick {} is too old: {} or newer has the security fixes needed (Settings > Update Converters…)",
+            show(version),
+            show(MAGICK_MIN)
+        ));
+    }
+    Ok(())
+}
+
+/// "Version: ImageMagick 7.1.2-35 Q16-HDRI aarch64 …" gives (7, 1, 2, 35).
+fn parse_magick_version(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let word = line.split_whitespace().skip_while(|w| *w != "ImageMagick").nth(1)?;
+    let (dotted, patch) = word.split_once('-')?;
+    let mut parts = dotted.split('.').map(|n| n.parse::<u32>().ok());
+    let version = (parts.next()??, parts.next()??, parts.next()??, patch.parse().ok()?);
+    parts.next().is_none().then_some(version)
 }
 
 /// `--sandbox` arrived in pandoc 2.15; older pandoc stops at the unknown option with a
@@ -4072,7 +4133,7 @@ pub fn missing(error: &str) -> Option<&'static Converter> {
 /// Whether the app can find `c` now, where a conversion would look for it.
 pub fn installed(c: &Converter) -> bool {
     match c.tool {
-        "magick" => magick().is_ok(),
+        "magick" => magick_path().is_ok(),
         "soffice" => soffice().is_ok(),
         "gs" => ghostscript().is_ok(),
         tool_name => tool(tool_name).is_ok(),
@@ -5607,6 +5668,32 @@ mod tests {
         assert_eq!(parse_pandoc_version("pandoc 2.9.2.1"), Some((2, 9)));
         assert_eq!(parse_pandoc_version("pandoc"), None);
         assert_eq!(parse_pandoc_version(""), None);
+    }
+
+    #[test]
+    fn imagemagick_versions_are_read() {
+        let line = "Version: ImageMagick 7.1.2-35 Q16-HDRI aarch64 acaf7e418:20261031 https://imagemagick.org";
+        assert_eq!(parse_magick_version(line), Some((7, 1, 2, 35)));
+        assert_eq!(parse_magick_version("Version: ImageMagick 6.9.11-60 Q16 x86_64 2021-01-25"), Some((6, 9, 11, 60)));
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1.2 Q16"), None);
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1-2 Q16"), None);
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1.2.3-4 Q16"), None);
+        assert_eq!(parse_magick_version("ImageMagick"), None);
+        assert_eq!(parse_magick_version(""), None);
+    }
+
+    #[test]
+    fn an_imagemagick_older_than_the_last_high_fix_is_refused() {
+        assert!(magick_new_enough((7, 1, 2, 33)).is_ok());
+        assert!(magick_new_enough((7, 1, 2, 36)).is_ok());
+        assert!(magick_new_enough((7, 1, 3, 0)).is_ok());
+        let old = magick_new_enough((7, 1, 2, 32)).unwrap_err();
+        assert!(old.starts_with("ImageMagick 7.1.2-32 is too old: 7.1.2-33 or newer"), "{old}");
+        assert!(old.contains("Update Converters"), "{old}");
+        assert!(magick_new_enough((7, 1, 1, 47)).is_err());
+        assert!(magick_new_enough((6, 9, 13, 30)).is_err());
+        // A "too old" error is not "not installed": Install would not help, Update would.
+        assert!(missing(&old).is_none());
     }
 
     #[test]
