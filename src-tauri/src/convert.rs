@@ -5709,6 +5709,10 @@ mod tests {
     /// a DDS cropped; the editors' preview reads them the same way.
     #[test]
     fn tools_on_pictures_the_wheel_only_reads_make_pngs() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: tools on read-only pictures not tested");
+            return;
+        }
         let work = tempfile::tempdir().unwrap();
         let make = |name: &str| {
             let path = work.path().join(name);
@@ -5744,6 +5748,10 @@ mod tests {
     /// evened out into M4A; a WavPack file mixed down into FLAC, so nothing is lost.
     #[test]
     fn tools_on_video_and_sound_the_wheel_only_reads() {
+        if tool("ffmpeg").is_err() || tool("ffprobe").is_err() {
+            eprintln!("ffmpeg isn't installed: tools on read-only video and sound not tested");
+            return;
+        }
         let work = tempfile::tempdir().unwrap();
         let make = |args: &[&str], out: &Path| {
             let ok = Command::new(tool("ffmpeg").unwrap()).args(["-v", "error"]).args(args).arg(out).status().unwrap().success();
