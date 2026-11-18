@@ -1,16 +1,51 @@
 //! Wheel geometry and state, shared by the trigger and the drop target.
 
 use std::f64::consts::TAU;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{Combo, Keys};
 
-/// Window size in points. src/wheel.js draws the rings with the same numbers.
+/// Window size in points at Normal scale. src/wheel.js draws the rings with the same
+/// numbers, in a viewBox of this size, so the page grows with the window. All the
+/// geometry here stays in these points; only the window is scaled (see `side`).
 pub const SIZE: f64 = 340.0;
 pub const R_IN: f64 = 62.0;
 pub const R_OUT: f64 = 160.0;
+
+/// Settings > Wheel > Scale, in percent: Normal, Large, Largest. The whole wheel grows,
+/// words included, so they stay as big as their segments allow at every wheel size.
+pub const SCALES: [u16; 3] = [100, 125, 150];
+
+/// The scale the next wheel opens at, as f64 bits: set at the start and from Settings.
+static SCALE: AtomicU64 = AtomicU64::new(1.0f64.to_bits());
+
+pub fn set_scale(factor: f64) {
+    let factor = if factor.is_finite() && factor > 0.0 { factor } else { 1.0 };
+    SCALE.store(factor.to_bits(), Ordering::Relaxed);
+}
+
+pub fn scale() -> f64 {
+    f64::from_bits(SCALE.load(Ordering::Relaxed))
+}
+
+/// The wheel window's side in points at the scale set now.
+pub fn side() -> f64 {
+    side_at(scale())
+}
+
+fn side_at(scale: f64) -> f64 {
+    (SIZE * scale).round()
+}
+
+/// Hover state for a point in a wheel window `side` points wide, in the window's
+/// points from its top left (y pointing down).
+pub fn hover_in_window(x: f64, y: f64, side: f64, n: usize) -> Hover {
+    let k = if side > 0.0 { SIZE / side } else { 1.0 };
+    hover_at((x - side / 2.0) * k, (side / 2.0 - y) * k, n)
+}
 
 /// A poisoned lock still holds valid data here, so carry on with it.
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -321,6 +356,37 @@ mod tests {
         assert_eq!(hover_at(0.0, 0.0, 4), Hover { segment: None, hub: true });
         assert_eq!(hover_at(R_OUT + 20.0, 0.0, 4), Hover::NONE);
         assert_eq!(hover_at(0.0, 100.0, 0), Hover::NONE);
+    }
+
+    #[test]
+    fn a_larger_wheel_finds_the_same_segments() {
+        let r = (R_IN + R_OUT) / 2.0;
+        for scale in SCALES.map(|p| f64::from(p) / 100.0) {
+            let side = side_at(scale);
+            let c = side / 2.0;
+            // The same spots on the wheel, in the bigger window's points (y down).
+            let at = |dx: f64, dy: f64| hover_in_window(c + dx * scale, c - dy * scale, side, 4);
+            assert_eq!(at(0.0, r).segment, Some(0), "{scale}");
+            assert_eq!(at(r, 0.0).segment, Some(1), "{scale}");
+            assert_eq!(at(0.0, -r).segment, Some(2), "{scale}");
+            assert_eq!(at(-r, 0.0).segment, Some(3), "{scale}");
+            assert!(at(0.0, 0.0).hub, "{scale}");
+            assert_eq!(at(R_OUT + 20.0, 0.0), Hover::NONE, "{scale}");
+            // Just inside the hub at this scale is still the hub, not a segment.
+            assert!(at(R_IN - 1.0, 0.0).hub, "{scale}");
+        }
+        assert_eq!(side_at(1.0), SIZE);
+        assert_eq!(side_at(1.25), 425.0);
+        assert_eq!(side_at(1.5), 510.0);
+    }
+
+    #[test]
+    fn a_bad_scale_counts_as_normal() {
+        set_scale(f64::NAN);
+        assert_eq!(scale(), 1.0);
+        set_scale(0.0);
+        assert_eq!(scale(), 1.0);
+        set_scale(1.0);
     }
 
     #[test]

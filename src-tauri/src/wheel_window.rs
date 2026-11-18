@@ -60,9 +60,8 @@ pub fn install(app: &AppHandle, mtm: MainThreadMarker) -> Result<(), String> {
     install_glass(&content, mtm);
     apply_glass(app);
 
-    let c = wheel::SIZE / 2.0;
-    let frame = NSRect::new(NSPoint::new(c - ICON / 2.0, c - ICON / 2.0 + ICON_LIFT), NSSize::new(ICON, ICON));
-    let icon = NSImageView::initWithFrame(NSImageView::alloc(mtm), frame);
+    // The window starts at its Normal size; `open` sizes it and the icon for the scale.
+    let icon = NSImageView::initWithFrame(NSImageView::alloc(mtm), icon_frame(wheel::SIZE));
     icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     icon.setEditable(false);
     content.addSubview_positioned_relativeTo(&icon, NSWindowOrderingMode::Above, None);
@@ -71,6 +70,14 @@ pub fn install(app: &AppHandle, mtm: MainThreadMarker) -> Result<(), String> {
     // A transparent window's shadow follows what is drawn, so this gives the disc a soft edge.
     window.setHasShadow(true);
     Ok(())
+}
+
+/// The hub icon's place in a wheel window `side` points wide: in the middle, a little
+/// above the centre, and as much bigger than at Normal as the wheel is.
+fn icon_frame(side: f64) -> NSRect {
+    let k = side / wheel::SIZE;
+    let (icon, c) = (ICON * k, side / 2.0);
+    NSRect::new(NSPoint::new(c - icon / 2.0, c - icon / 2.0 + ICON_LIFT * k), NSSize::new(icon, icon))
 }
 
 /// Puts the frosted material under the web page, once (glass added after the window
@@ -111,8 +118,12 @@ pub fn set_words(app: &AppHandle, words: Vec<WordBox>) {
 }
 
 /// The glass mask: its alpha is how strongly the frosted material shows at each point.
+/// Made at the window's scaled size; the frosting itself is worked out in the points of
+/// the Normal wheel, where the page measures its words.
 fn mask(blur: f64, words: &[WordBox]) -> Option<Retained<NSImage>> {
-    let side = (wheel::SIZE * MASK_SCALE) as usize;
+    let points = wheel::side();
+    let k = points / wheel::SIZE;
+    let side = (points * MASK_SCALE) as usize;
     // SAFETY: no planes are passed, so the rep makes its own buffer for the sizes given.
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
@@ -138,11 +149,11 @@ fn mask(blur: f64, words: &[WordBox]) -> Option<Retained<NSImage>> {
     // Rows run from the top, like the page's coordinates. Black at the alpha: the
     // buffer is premultiplied, so the colour stays 0.
     for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let (x, y) = (((i % side) as f64 + 0.5) / MASK_SCALE, ((i / side) as f64 + 0.5) / MASK_SCALE);
+        let (x, y) = (((i % side) as f64 + 0.5) / MASK_SCALE / k, ((i / side) as f64 + 0.5) / MASK_SCALE / k);
         let alpha = wheel::glass_alpha(x, y, blur, words);
         *pixel = [0, 0, 0, (alpha * 255.0).round() as u8];
     }
-    let size = NSSize::new(wheel::SIZE, wheel::SIZE);
+    let size = NSSize::new(points, points);
     rep.setSize(size);
     let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.addRepresentation(&rep);
@@ -154,8 +165,10 @@ pub fn open(app: &AppHandle, first_path: Option<&str>) {
     let (Some(mtm), Some(window)) = (MainThreadMarker::new(), ns_window(app)) else {
         return;
     };
+    let side = wheel::side();
     HUB_ICON.with(|h| {
         if let Some(view) = &*h.borrow() {
+            view.setFrame(icon_frame(side));
             let image = first_path.map(|p| NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(p)));
             view.setImage(image.as_deref());
         }
@@ -163,8 +176,9 @@ pub fn open(app: &AppHandle, first_path: Option<&str>) {
     if let Some(path) = first_path {
         show_thumbnail(app, path);
     }
+    // Sized first, so the glass mask is made for the window it goes in.
+    place_at_cursor(&window, mtm, side);
     apply_glass(app);
-    place_at_cursor(&window, mtm);
     window.setAlphaValue(0.0);
     window.orderFrontRegardless();
     window.invalidateShadow();
@@ -187,7 +201,7 @@ fn show_thumbnail(app: &AppHandle, path: &str) {
         QLThumbnailGenerationRequest::initWithFileAtURL_size_scale_representationTypes(
             QLThumbnailGenerationRequest::alloc(),
             &url,
-            NSSize::new(ICON, ICON),
+            NSSize::new(ICON * wheel::scale(), ICON * wheel::scale()),
             2.0,
             QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
         )
@@ -235,11 +249,11 @@ pub fn close(app: &AppHandle, generation: u64) {
     });
 }
 
-/// Centres the wheel on the cursor, nudged inside the screen's usable area so no
-/// part of it hides under the menu bar, the Dock or a screen edge.
-fn place_at_cursor(window: &NSWindow, mtm: MainThreadMarker) {
+/// Sizes the wheel for its scale (`s` points a side) and centres it on the cursor,
+/// nudged inside the screen's usable area so no part of it hides under the menu bar,
+/// the Dock or a screen edge.
+fn place_at_cursor(window: &NSWindow, mtm: MainThreadMarker, s: f64) {
     let p = NSEvent::mouseLocation();
-    let s = wheel::SIZE;
     let (mut x, mut y) = (p.x - s / 2.0, p.y - s / 2.0);
     let screens = NSScreen::screens(mtm);
     let under_cursor = screens.iter().find(|screen| {
@@ -251,7 +265,8 @@ fn place_at_cursor(window: &NSWindow, mtm: MainThreadMarker) {
         x = x.min(v.origin.x + v.size.width - s).max(v.origin.x);
         y = y.min(v.origin.y + v.size.height - s).max(v.origin.y);
     }
-    window.setFrameOrigin(NSPoint::new(x, y));
+    // Origin and size together: the window is borderless, so its frame is the page.
+    window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(s, s)), false);
 }
 
 fn fade(window: Retained<NSWindow>, to: f64, seconds: f64, done: impl Fn() + 'static) {

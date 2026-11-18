@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::settings::{self, Combo, Highlight, Level, Quality, SaveTo, Store, Transparency, WheelSize};
+use crate::settings::{self, Combo, Highlight, Level, Quality, SaveTo, Store, Transparency, WheelScale, WheelSize};
 use crate::wheel::Which;
 use crate::{converters, formats, log, login, reveal};
 
@@ -120,6 +120,15 @@ pub struct View {
     /// Most segments a wheel shows at once, and the sizes to pick from.
     wheel_size: usize,
     wheel_sizes: Vec<usize>,
+    /// How big the wheel is drawn, in percent, and the scales to pick from.
+    wheel_scale: u16,
+    wheel_scales: Vec<ScaleChoice>,
+}
+
+#[derive(Serialize)]
+struct ScaleChoice {
+    percent: u16,
+    label: &'static str,
 }
 
 /// One change from the page.
@@ -143,6 +152,8 @@ pub enum Change {
     Hold { on: bool },
     /// Most segments a wheel shows at once: one of formats::WHEEL_SIZES.
     WheelSize { segments: u8 },
+    /// How big the wheel is drawn, in percent: one of wheel::SCALES.
+    WheelScale { percent: u16 },
 }
 
 fn system() -> &'static str {
@@ -224,6 +235,8 @@ fn view(app: &AppHandle) -> View {
         pages: cfg!(target_os = "macos").then(crate::convert::pages_installed),
         wheel_size: s.wheel_size.segments(),
         wheel_sizes: formats::WHEEL_SIZES.to_vec(),
+        wheel_scale: s.wheel_scale.percent(),
+        wheel_scales: crate::wheel::SCALES.iter().map(|&percent| ScaleChoice { percent, label: WheelScale::label(percent) }).collect(),
     }
 }
 
@@ -312,6 +325,13 @@ fn edit(change: &Change) -> Result<Edit, String> {
             let size = WheelSize(*segments);
             Box::new(move |s| s.wheel_size = size)
         }
+        Change::WheelScale { percent } => {
+            if !crate::wheel::SCALES.contains(percent) {
+                return Err(format!("no wheel scale {percent}%"));
+            }
+            let scale = WheelScale(*percent);
+            Box::new(move |s| s.wheel_scale = scale)
+        }
         Change::Hold { on } => {
             if !hold_here() {
                 return Err("Hold to Convert can't see a drag start on Wayland".into());
@@ -344,6 +364,11 @@ fn apply(app: &AppHandle, change: Change) -> Result<(), String> {
         // For Show Log: the next wheel should light up in this colour.
         Change::Highlight { .. } => log::line(&format!("highlight colour now {}", saved.highlight.key())),
         Change::WheelSize { .. } => log::line(&format!("wheel size now {}", saved.wheel_size.segments())),
+        // The next wheel opens at this scale.
+        Change::WheelScale { .. } => {
+            crate::wheel::set_scale(saved.wheel_scale.factor());
+            log::line(&format!("wheel scale now {}%", saved.wheel_scale.percent()));
+        }
         #[cfg(windows)]
         Change::SendTo { .. } => {
             let handle = app.clone();
@@ -535,6 +560,20 @@ mod tests {
         for n in [0, 9, 11, 13, 255] {
             assert!(edit(&Change::WheelSize { segments: n }).is_err(), "{n}");
         }
+    }
+
+    #[test]
+    fn the_wheel_scale_is_one_of_three() {
+        let c: Change = serde_json::from_str(r#"{"what":"wheel-scale","percent":125}"#).unwrap();
+        assert_eq!(changed(c).wheel_scale.percent(), 125);
+        let c: Change = serde_json::from_str(r#"{"what":"wheel-scale","percent":150}"#).unwrap();
+        assert_eq!(changed(c).wheel_scale.percent(), 150);
+        for p in [0, 50, 99, 101, 175, 200, 1000] {
+            assert!(edit(&Change::WheelScale { percent: p }).is_err(), "{p}");
+        }
+        assert_eq!(WheelScale::label(100), "Normal");
+        assert_eq!(WheelScale::label(125), "Large");
+        assert_eq!(WheelScale::label(150), "Largest");
     }
 
     #[test]

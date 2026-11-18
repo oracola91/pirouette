@@ -864,6 +864,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     let (store, settings_problem) = settings::Store::load(app.path().app_config_dir()?.join("settings.json"));
     wheel::set_keys(store.get().keys);
+    wheel::set_scale(store.get().wheel_scale.factor());
     trigger::set_hold(store.get().hold_to_convert);
     #[cfg(target_os = "macos")]
     trigger::set_mac_arrows(store.get().arrow_keys);

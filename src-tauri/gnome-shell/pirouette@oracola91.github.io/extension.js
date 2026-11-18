@@ -22,7 +22,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 const POLL_MS = 30;
 // The wheel's window: its title and its size (src-tauri/tauri.conf.json).
 const WHEEL_TITLE = 'Pirouette';
-const WHEEL_SIZE = 340;
+// The wheel window's side at each scale (Settings > Wheel > Scale): Normal, Large, Largest.
+const WHEEL_SIDES = [340, 425, 510];
 // The arrow keys, in the order the app numbers them, and the keys that may be held
 // with them during a drag (Shift opens the wheel; Alt and Control pick another one).
 const ARROWS = ['Left', 'Right', 'Up', 'Down'];
@@ -154,7 +155,7 @@ export default class PirouetteExtension extends Extension {
             return;
         const frame = win.get_frame_rect();
         // Not on screen yet, or not the wheel after all.
-        if (Math.abs(frame.width - WHEEL_SIZE) > 8 || Math.abs(frame.height - WHEEL_SIZE) > 8)
+        if (!WHEEL_SIDES.some(side => Math.abs(frame.width - side) <= 8 && Math.abs(frame.height - side) <= 8))
             return;
         this._seen.add(win);
         const [x, y] = global.get_pointer();

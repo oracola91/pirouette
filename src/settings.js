@@ -233,6 +233,11 @@ function wheel(v) {
       segments('wheel-size', v.wheel_sizes.map((n) => ({ key: String(n), label: String(n) })), String(v.wheel_size), (n) => change({ what: 'wheel-size', segments: Number(n) }), 'Segments on the wheel'),
       'Most segments on the wheel at once. A wheel with more shows them a set at a time: rest on More for the next.',
     ),
+    row(
+      'Scale',
+      segments('wheel-scale', v.wheel_scales.map((s) => ({ key: String(s.percent), label: s.label })), String(v.wheel_scale), (p) => change({ what: 'wheel-scale', percent: Number(p) }), 'How big the wheel is'),
+      'The whole wheel, words included, bigger for easier reading. Takes effect at the next wheel.',
+    ),
   );
 
   const kinds = v.kinds.map((k) =>
