@@ -129,4 +129,4 @@ Issues and pull requests are welcome.
 
 This is our own build, written from scratch: a Tauri app with the native parts in Rust (`src-tauri/`) and the wheel in plain HTML, CSS and JavaScript (`src/`), with no frontend framework and no npm runtime packages. The icons on the Tools and Actions wheels are from [Lucide](https://lucide.dev) (ISC, see `src/icons-LICENSE.txt`).
 
-Pirouette is released under the [MIT licence](LICENSE).
+Pirouette is released under the [MIT licence](LICENSE). Parts it is built with keep their own licences: see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
