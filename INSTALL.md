@@ -162,7 +162,7 @@ Pirouette is a personal, open-source project. A code-signing certificate that Wi
 What protects a download instead:
 
 - **The checksums.** Every release lists the SHA-256 of each file in `SHA256SUMS.txt`, made by the same GitHub build that made the files. Check the file before opening it (above). If it doesn't match, delete it.
-- **The update signature.** Once installed, the app updates itself only with files signed with the project's update key, and checks that signature itself (see *What protects an update* in the README). Updates carry no download mark, so no warning appears for them.
+- **The update signature.** Once installed, the app updates itself only with files signed with the project's update key, and checks that signature itself (see *What protects an update* in [docs/updates.md](docs/updates.md)). Updates carry no download mark, so no warning appears for them.
 
 Getting past the warning, for a file you checked:
 
