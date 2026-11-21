@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/oracola91/pirouette/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/oracola91/pirouette?label=release&color=f26a2c"></a>
-  <a href="https://github.com/oracola91/pirouette"><img alt="Licence" src="https://img.shields.io/github/license/oracola91/pirouette?label=licence"></a>
+  <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/github/license/oracola91/pirouette?label=licence"></a>
   <img alt="Platforms: macOS, Windows, Linux" src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-3b2a6b">
   <a href="https://github.com/oracola91/pirouette/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/oracola91/pirouette/test.yml?branch=main&event=push&label=tests"></a>
 </p>
@@ -128,3 +128,5 @@ Issues and pull requests are welcome.
 ## About
 
 This is our own build, written from scratch: a Tauri app with the native parts in Rust (`src-tauri/`) and the wheel in plain HTML, CSS and JavaScript (`src/`), with no frontend framework and no npm runtime packages. The icons on the Tools and Actions wheels are from [Lucide](https://lucide.dev) (ISC, see `src/icons-LICENSE.txt`).
+
+Pirouette is released under the [MIT licence](LICENSE).
