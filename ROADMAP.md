@@ -1,6 +1,6 @@
 # Roadmap
 
-The aim: everything a good drag-and-drop file tool does, on macOS, Windows and Linux, and then more. Files never leave the computer, results never replace the original, and every new tool gets the same safety rules as the converters (see the Safety section of the README).
+The aim: everything a good drag-and-drop file tool does, on macOS, Windows and Linux, and then more. Files never leave the computer, results never replace the original, and every new tool gets the same safety rules as the converters (see [docs/safety.md](docs/safety.md)).
 
 ## Three wheels
 
@@ -24,7 +24,7 @@ Status, 2026-11-10: stages 1 to 8 are built (on branches, not yet released). Sta
 - Video: compress, a still image from the first frame, remove metadata.
 - Audio: even out loudness, mono or stereo.
 
-**3. The Actions wheel.** Copy, Move, Copy Path, Show in Folder, open a terminal there, Share (AirDrop on macOS, the Share panel on Windows), and a shelf that holds files for the next drag. The shelf came first, on macOS (at the top of the screen, see README); Windows and Linux follow.
+**3. The Actions wheel.** Copy, Move, Copy Path, Show in Folder, open a terminal there, Share (AirDrop on macOS, the Share panel on Windows), and a shelf that holds files for the next drag. The shelf came first, on macOS (at the top of the screen, see [docs/shelf.md](docs/shelf.md)); Windows and Linux follow.
 
 **4. More formats.**
 - Archives: make ZIP, TAR and GZIP; unpack ZIP, TAR, GZIP and RAR.
