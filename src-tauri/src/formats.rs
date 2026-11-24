@@ -317,9 +317,72 @@ pub fn is_tool(id: &str) -> bool {
     id.starts_with("tool:")
 }
 
+/// Tools that also take the pictures, videos and sound the wheel reads but doesn't write
+/// (a Photoshop file, a camcorder's MTS, an AC3 track; `read_only`). Such a file's own
+/// format can't be kept, so the result is in `tool_format`'s: PNG, MP4, or FLAC or M4A.
+/// Only tools that write their result anew: not the ones that copy the streams as they
+/// are (Remove Metadata, Mute, Bleep on a video, Split, Join), use a format's own
+/// settings (Compress for pictures and sound, To a Size), or edit its tags (Info).
+const PICTURE_TOOLS_FOR_ALL: &[&str] = &[
+    "tool:half", "tool:resize", "tool:rotate", "tool:flip", "tool:qr", "tool:adjust", "tool:markup", "tool:crop", "tool:onepdf",
+    "tool:collage",
+];
+const VIDEO_TOOLS_FOR_ALL: &[&str] = &[
+    "tool:compress", "tool:resize", "tool:flip", "tool:crop", "tool:blackout", "tool:trim", "tool:speed", "tool:still", "tool:snapshot",
+];
+const SOUND_TOOLS_FOR_ALL: &[&str] = &["tool:trim", "tool:bleep", "tool:speed", "tool:loudness", "tool:mono"];
+
+/// Sound formats read but not written that hold the sound without loss (or as PCM):
+/// a tool's result goes to FLAC, so nothing is lost on the way. The rest go to M4A.
+const LOSSLESS_SOUND: &[&str] = &["aifc", "au", "snd", "voc", "w64", "wv", "tta", "ape", "tak", "dsf", "caf"];
+
+/// The kind of a picture, video or sound format the wheel reads but doesn't write.
+/// Camera RAW is left out: it is developed into a TIFF first.
+fn read_only(ext: &str) -> Option<Kind> {
+    let kind = kind_of(ext)?;
+    let writes = |k: Kind| KINDS.iter().any(|(kk, _, outs)| *kk == k && outs.contains(&canonical(ext)));
+    match kind {
+        Kind::Image if MORE_PICTURES.contains(&ext) => Some(kind),
+        Kind::Video | Kind::Audio if !writes(kind) => Some(kind),
+        _ => None,
+    }
+}
+
+/// Whether `tool` keeps .`ext` files in their own format (TOOLS lists it).
+pub fn keeps_format(tool: &str, ext: &str) -> bool {
+    TOOLS.iter().any(|(id, ins)| *id == tool && ins.contains(&ext))
+}
+
 /// Whether `tool` works on .`ext` files.
 pub fn tool_takes(tool: &str, ext: &str) -> bool {
-    TOOLS.iter().any(|(id, ins)| *id == tool && ins.contains(&ext))
+    keeps_format(tool, ext)
+        || match read_only(ext) {
+            Some(Kind::Image) => PICTURE_TOOLS_FOR_ALL.contains(&tool),
+            Some(Kind::Video) => VIDEO_TOOLS_FOR_ALL.contains(&tool),
+            Some(Kind::Audio) => SOUND_TOOLS_FOR_ALL.contains(&tool),
+            _ => false,
+        }
+}
+
+/// The format `tool`'s result is in: the file's own when the tool keeps it, otherwise
+/// PNG for a picture, MP4 for a video, FLAC for lossless sound and M4A for other sound.
+pub fn tool_format(tool: &str, ext: &str) -> &'static str {
+    if keeps_format(tool, ext) {
+        return canonical_static(ext);
+    }
+    match read_only(ext) {
+        Some(Kind::Image) => "png",
+        Some(Kind::Video) => "mp4",
+        Some(Kind::Audio) if LOSSLESS_SOUND.contains(&ext) => "flac",
+        Some(Kind::Audio) => "m4a",
+        _ => canonical_static(ext),
+    }
+}
+
+/// `canonical` for an extension the app knows, as one of its own names.
+fn canonical_static(ext: &str) -> &'static str {
+    let c = canonical(ext);
+    KINDS.iter().flat_map(|(_, ins, outs)| ins.iter().chain(outs.iter())).find(|known| **known == c).copied().unwrap_or("")
 }
 
 /// Tools that work on every dragged file, in wheel order.
@@ -330,8 +393,8 @@ pub fn tools_for(paths: &[String]) -> Vec<&'static str> {
     }
     TOOLS
         .iter()
-        .filter(|(id, ins)| {
-            exts.iter().all(|e| ins.contains(&e.as_str()))
+        .filter(|(id, _)| {
+            exts.iter().all(|e| tool_takes(id, e))
                 && (!combines(id) || paths.len() > 1)
                 && (!opens_editor(id) || paths.len() == 1)
                 // One file has To a Size (with Half and Quarter); this is for several.
@@ -647,6 +710,36 @@ mod tests {
     fn word_files_offer_pdf() {
         assert!(formats_for(&v(&["/tmp/a.docx"]), all_shown).contains(&"pdf"));
         assert!(formats_for(&v(&["/tmp/a.doc"]), all_shown).contains(&"docx"));
+    }
+
+    #[test]
+    fn formats_the_wheel_only_reads_get_the_tools_that_write_anew() {
+        assert_eq!(
+            tools_for(&v(&["/tmp/a.psd"])),
+            ["tool:half", "tool:resize", "tool:rotate", "tool:flip", "tool:qr", "tool:adjust", "tool:markup", "tool:crop"]
+        );
+        assert_eq!(tools_for(&v(&["/tmp/a.psd", "/tmp/b.TGA", "/tmp/c.jpg"]))[..3], ["tool:half", "tool:rotate", "tool:flip"]);
+        assert!(tools_for(&v(&["/tmp/a.psd", "/tmp/b.tga"])).ends_with(&["tool:onepdf", "tool:collage"]));
+        assert_eq!(
+            tools_for(&v(&["/tmp/a.MTS"])),
+            [
+                "tool:compress", "tool:resize", "tool:flip", "tool:crop", "tool:blackout", "tool:trim", "tool:speed", "tool:still",
+                "tool:snapshot"
+            ]
+        );
+        assert_eq!(tools_for(&v(&["/tmp/a.ac3"])), ["tool:trim", "tool:bleep", "tool:speed", "tool:loudness", "tool:mono"]);
+        // Camera RAW still has none: it is developed first, and only converted.
+        assert!(tools_for(&v(&["/tmp/a.arw"])).is_empty());
+
+        assert_eq!(tool_format("tool:half", "psd"), "png");
+        assert_eq!(tool_format("tool:compress", "mts"), "mp4");
+        assert_eq!(tool_format("tool:mono", "wv"), "flac");
+        assert_eq!(tool_format("tool:loudness", "ac3"), "m4a");
+        // A format the tool already took keeps it, as before.
+        assert_eq!(tool_format("tool:half", "jpeg"), "jpg");
+        assert_eq!(tool_format("tool:compress", "m4v"), "m4v");
+        assert_eq!(tool_format("tool:trim", "aac"), "aac");
+        assert!(!tool_takes("tool:mute", "mts") && !tool_takes("tool:clean", "psd") && !tool_takes("tool:join", "ac3"));
     }
 
     #[test]
