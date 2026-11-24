@@ -197,7 +197,7 @@ pub fn convert(src: &Path, target: &str, save_in: Option<&Path>, fallback: &Path
             Some(Edit::Info(changes)) => file(info::write_exif(&input, &out, kind == Kind::Video, &changes)),
             _ => Err("Info opens its window from the wheel".to_string()),
         },
-        (Some(t), Kind::Image) => file(image_tool(&input, t, &out)),
+        (Some(t), Kind::Image) => file(image_tool(&input, t, &out, work.path())),
         // Ghostscript alone; MuPDF isn't needed for it.
         (Some("tool:pdfa"), Kind::Pdf) => file(to_pdfa(&input, &out, work.path())),
         (Some(t), Kind::Pdf) => pdf_tool(&input, t, &out, &work),
@@ -819,13 +819,14 @@ fn tool_done(tool: &str) -> &'static str {
     }
 }
 
-/// The format a tool's result is in: the file's own, except First Frame's picture and
-/// a QR code's text.
+/// The format a tool's result is in: the file's own (PNG, MP4, FLAC or M4A for a format
+/// the wheel only reads; formats::tool_format), except First Frame's picture and a QR
+/// code's text.
 fn tool_out_ext(tool_id: &str, ext: &str) -> String {
     match tool_id {
         "tool:still" | "tool:snapshot" => "jpg".into(),
         "tool:qr" => "txt".into(),
-        _ => formats::canonical(ext).into(),
+        _ => formats::tool_format(tool_id, ext).into(),
     }
 }
 
@@ -836,7 +837,9 @@ const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 /// Runs a Tools wheel tool on audio or video (`ext`, its own format). Like the
 /// conversions, it goes through `ffmpeg`, locked down to local files and our formats.
 fn media_tool(src: &Path, ext: &str, tool_id: &str, out: &Path) -> Result<(), String> {
-    let own = formats::canonical(ext);
+    // What the result is written as: the file's own format, or MP4, FLAC or M4A for
+    // one the wheel only reads (an MTS, an AC3).
+    let own = formats::tool_format(tool_id, ext);
     let video = formats::kind_of(ext) == Some(Kind::Video);
     match tool_id {
         // The sound and its other tags as they are, with the tags from Info's window.
@@ -952,7 +955,7 @@ fn media_tool(src: &Path, ext: &str, tool_id: &str, out: &Path) -> Result<(), St
             let Some(Edit::Trim(trim)) = control().and_then(|c| c.edit.clone()) else {
                 return Err("Trim opens its window from the wheel".into());
             };
-            cut(src, ext, trim.start_ms, trim.end_ms, out)
+            cut(src, ext, own, trim.start_ms, trim.end_ms, out)
         }
         // The part chosen in the Bleep window becomes a tone; the rest of the sound, and
         // a video's picture, stay as they are (the picture is copied, not encoded again).
@@ -1024,10 +1027,9 @@ fn resize_filter(side: u32) -> String {
 }
 
 /// The part of a sound or video from `start_ms` to `end_ms`, cut exactly where asked:
-/// read from the start and encoded again (in the file's own format, at the menu's
+/// read from the start and encoded again (in `own`, the result's format, at the menu's
 /// quality), rather than copied, which could only cut at the nearest keyframe.
-fn cut(src: &Path, ext: &str, start_ms: u64, end_ms: u64, out: &Path) -> Result<(), String> {
-    let own = formats::canonical(ext);
+fn cut(src: &Path, ext: &str, own: &str, start_ms: u64, end_ms: u64, out: &Path) -> Result<(), String> {
     let video = formats::kind_of(ext) == Some(Kind::Video);
     let seconds = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
     let (from, to) = (seconds(start_ms), seconds(end_ms));
@@ -1069,7 +1071,7 @@ fn media_parts(src: &Path, ext: &str, work: &Path) -> Result<Output, String> {
     for i in 0..count {
         let end = if i + 1 == count { length_ms } else { (i + 1) * every_ms };
         let part = work.join(format!("part-{i}.{own}"));
-        cut(src, ext, i * every_ms, end, &part)?;
+        cut(src, ext, own, i * every_ms, end, &part)?;
         files.push(part);
     }
     Ok(Output::Pages { files, cut: false })
@@ -1102,16 +1104,34 @@ fn sample_rate(src: &Path, out: &Path) -> Option<u32> {
     fs::read_to_string(&answer).ok()?.trim().parse().ok().filter(|r| (8_000..=384_000).contains(r))
 }
 
+/// How a tool, Collage, One PDF and the editors' preview read a picture: the way a
+/// conversion does (`image`). Its real format from the first bytes (from the extension
+/// for formats with no clear mark); on a Mac, JPEG 2000, JPEG XL, OpenEXR and icons
+/// decoded by the system to a TIFF in `work` first; GIMP files flattened, and the
+/// largest size of an icon or cursor (picture_input). Gives the format read, and
+/// ImageMagick's input with what goes right after it.
+fn picture_source(src: &Path, work: &Path) -> Result<(&'static str, String, Vec<&'static str>), String> {
+    let ext = formats::extension(src).unwrap_or_default();
+    let coder = picture_coder(&read_start(src, PICTURE_HEAD)?, &ext).ok_or("this is not an image format the wheel can read")?;
+    if let Some(tiff) = system_decoded(src, work)? {
+        return Ok((coder, format!("tiff:{}", tiff.display()), Vec::new()));
+    }
+    let (input, after) = picture_input(src, coder, "png")?;
+    Ok((coder, input, after))
+}
+
 /// Runs a Tools wheel tool on a picture. The result is written in the picture's real
-/// format, upright, with its colour profile; other metadata stays too, except with
-/// Remove Metadata.
-fn image_tool(src: &Path, tool: &str, out: &Path) -> Result<(), String> {
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
+/// format (PNG for one the wheel only reads, such as a Photoshop file), upright, with
+/// its colour profile; other metadata stays too, except with Remove Metadata.
+fn image_tool(src: &Path, tool: &str, out: &Path, work: &Path) -> Result<(), String> {
+    let ext = formats::extension(src).unwrap_or_default();
+    let (coder, input, after) = picture_source(src, work)?;
+    let write_as = if formats::keeps_format(tool, &ext) { coder } else { out_coder(formats::tool_format(tool, &ext)) };
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
     // Upright first, so a photo that was only turned by its EXIF tag still looks the
     // same once the tag is gone or the picture is changed.
-    cmd.arg(format!("{coder}:{}[0]", src.display())).arg("-auto-orient");
+    cmd.arg(input).args(after).arg("-auto-orient");
     match tool {
         // PNG has no quality setting: fewer colours (256, dithered) is what shrinks it.
         "tool:compress" if coder == "png" => cmd.args(["-colors", "256"]),
@@ -1172,14 +1192,14 @@ fn image_tool(src: &Path, tool: &str, out: &Path) -> Result<(), String> {
     // can't tell. For WebP and AVIF 80 is close to what browsers use (90 made files three
     // times bigger); HEIC needs 60 for about the size an iPhone writes (80 made them two
     // and a half times bigger).
-    if tool != "tool:compress" && matches!(coder, "webp" | "heic" | "avif") {
-        cmd.args(["-quality", if coder == "heic" { "60" } else { "80" }]);
+    if tool != "tool:compress" && matches!(write_as, "webp" | "heic" | "avif") {
+        cmd.args(["-quality", if write_as == "heic" { "60" } else { "80" }]);
     }
-    if coder == "png" {
+    if write_as == "png" {
         // ImageMagick would otherwise add its own dates to a PNG.
         cmd.args(["-define", "png:exclude-chunks=date,time"]);
     }
-    cmd.arg(format!("{coder}:{}", out.display()));
+    cmd.arg(format!("{write_as}:{}", out.display()));
     run(cmd, QUICK)
 }
 
@@ -2578,11 +2598,11 @@ fn collage(srcs: &[PathBuf], only: &str, save_in: Option<&Path>, fallback: &Path
         }
         let staged = work.path().join(format!("input-{i}.{ext}"));
         fs::copy(src, &staged).map_err(|e| fail(format!("can't read the file: {e}")))?;
-        let coder = sniff_image(&read_head(&staged)?).ok_or_else(|| fail("this is not an image format the wheel can read".into()))?;
+        let (_, input, after) = picture_source(&staged, work.path()).map_err(fail)?;
         let tile = work.path().join(format!("tile-{i}.png"));
         let mut cmd = Command::new(&magick);
         cmd.args(IMAGE_LIMITS);
-        cmd.arg(format!("{coder}:{}[0]", staged.display())).arg("-auto-orient");
+        cmd.arg(input).args(after).arg("-auto-orient");
         cmd.args(["-resize", COLLAGE_TILE, "-background", "white", "-alpha", "remove", "-alpha", "off"]);
         cmd.args(["-gravity", "center", "-extent", COLLAGE_TILE, "-bordercolor", "white", "-border", COLLAGE_GAP]);
         cmd.arg(format!("png:{}", tile.display()));
@@ -2999,12 +3019,12 @@ fn ffmpeg_many(srcs: &[PathBuf], args: &[&str], out: &Path, limit: Duration) -> 
 /// a picture under 842 pixels keeps a smaller page. Photos go in as JPEG, the rest as
 /// PNG, so screenshots stay sharp.
 fn picture_page(src: &Path, work: &Path, n: usize) -> Result<PathBuf, String> {
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
+    let (coder, input, after) = picture_source(src, work)?;
     let photo = matches!(coder, "jpeg" | "heic" | "webp" | "avif");
     let page = work.join(format!("page-{n}.{}", if photo { "jpg" } else { "png" }));
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS);
-    cmd.arg(format!("{coder}:{}[0]", src.display())).arg("-auto-orient");
+    cmd.arg(input).args(after).arg("-auto-orient");
     cmd.args(["-background", "white", "-alpha", "remove", "-alpha", "off"]);
     cmd.args(["-units", "PixelsPerInch", "-set", "density", "%[fx:max(w,h)/11.69]"]);
     if photo {
@@ -3874,12 +3894,14 @@ fn peaks_of(raw: &[u8], n: usize) -> Vec<u8> {
 /// For the editor: the picture's size upright, in pixels, and a JPEG of it, upright
 /// too, at most 1400 pixels across and on white where it is see-through.
 pub fn preview(src: &Path) -> Result<(u32, u32, Vec<u8>), String> {
-    let coder = sniff_image(&read_head(src)?).ok_or("this is not an image format the wheel can read")?;
     let work = tempfile::tempdir().map_err(|e| format!("work folder: {e}"))?;
+    // Read as the tool will read it, so Crop's box lands on the same pixels.
+    let (_, input, after) = picture_source(src, work.path())?;
     let (jpeg, size) = (work.path().join("preview.jpg"), work.path().join("size.txt"));
     let mut cmd = Command::new(magick()?);
     cmd.args(IMAGE_LIMITS)
-        .arg(format!("{coder}:{}[0]", src.display()))
+        .arg(input)
+        .args(after)
         .args(["-auto-orient", "-format", "%w %h", "-write"])
         .arg(format!("info:{}", size.display()))
         .args(["-background", "white", "-flatten", "-resize", "1400x1400>", "-quality", "85"])
@@ -3915,8 +3937,69 @@ pub fn page_pictures(src: &Path) -> Result<Vec<Vec<u8>>, String> {
     }
 }
 
+/// ImageMagick for a conversion or a tool: found, and on macOS and Windows new enough
+/// (MAGICK_MIN).
 fn magick() -> Result<PathBuf, String> {
+    let path = magick_path()?;
+    if !cfg!(target_os = "linux") {
+        check_magick_version(&path)?;
+    }
+    Ok(path)
+}
+
+/// Where ImageMagick is, whatever its version: for "is it installed", so an old one is
+/// still found by Update Converters.
+fn magick_path() -> Result<PathBuf, String> {
     tool("magick").or_else(|e| if cfg!(target_os = "linux") { tool("convert").map_err(|_| e) } else { Err(e) })
+}
+
+/// ImageMagick reads every picture the wheel is given, often from mail or the web, so
+/// an old one is a risk. The floor is the release that fixed the newest High or Critical
+/// advisory (github.com/ImageMagick/ImageMagick/security/advisories): 7.1.2-33 fixed a
+/// stack buffer overwrite when reading bzip2-compressed images (2026-10-10). Raise it
+/// when a newer High or Critical fix comes out and Homebrew and winget have it. Linux
+/// is left out: distributions patch their ImageMagick without changing its version, so
+/// the number says nothing there.
+const MAGICK_MIN: (u32, u32, u32, u32) = (7, 1, 2, 33);
+
+/// Refuses an ImageMagick older than MAGICK_MIN, or one whose version can't be read.
+/// Asked once a run when it passes; an old one is asked again, so an update counts
+/// without a restart.
+fn check_magick_version(magick: &Path) -> Result<(), String> {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    if CHECKED.get().is_some() {
+        return Ok(());
+    }
+    let mut cmd = Command::new(magick);
+    cmd.arg("-version").stdin(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut cmd);
+    let out = cmd.output().map_err(|e| format!("could not start ImageMagick: {e}"))?;
+    let first = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_string();
+    let version = parse_magick_version(&first).ok_or("can't tell which ImageMagick version is installed")?;
+    magick_new_enough(version)?;
+    let _ = CHECKED.set(());
+    Ok(())
+}
+
+fn magick_new_enough(version: (u32, u32, u32, u32)) -> Result<(), String> {
+    if version < MAGICK_MIN {
+        let show = |(a, b, c, d): (u32, u32, u32, u32)| format!("{a}.{b}.{c}-{d}");
+        return Err(format!(
+            "ImageMagick {} is too old: {} or newer has the security fixes needed (Settings > Update Converters…)",
+            show(version),
+            show(MAGICK_MIN)
+        ));
+    }
+    Ok(())
+}
+
+/// "Version: ImageMagick 7.1.2-35 Q16-HDRI aarch64 …" gives (7, 1, 2, 35).
+fn parse_magick_version(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let word = line.split_whitespace().skip_while(|w| *w != "ImageMagick").nth(1)?;
+    let (dotted, patch) = word.split_once('-')?;
+    let mut parts = dotted.split('.').map(|n| n.parse::<u32>().ok());
+    let version = (parts.next()??, parts.next()??, parts.next()??, patch.parse().ok()?);
+    parts.next().is_none().then_some(version)
 }
 
 /// `--sandbox` arrived in pandoc 2.15; older pandoc stops at the unknown option with a
@@ -4072,7 +4155,7 @@ pub fn missing(error: &str) -> Option<&'static Converter> {
 /// Whether the app can find `c` now, where a conversion would look for it.
 pub fn installed(c: &Converter) -> bool {
     match c.tool {
-        "magick" => magick().is_ok(),
+        "magick" => magick_path().is_ok(),
         "soffice" => soffice().is_ok(),
         "gs" => ghostscript().is_ok(),
         tool_name => tool(tool_name).is_ok(),
@@ -5607,6 +5690,120 @@ mod tests {
         assert_eq!(parse_pandoc_version("pandoc 2.9.2.1"), Some((2, 9)));
         assert_eq!(parse_pandoc_version("pandoc"), None);
         assert_eq!(parse_pandoc_version(""), None);
+    }
+
+    #[test]
+    fn imagemagick_versions_are_read() {
+        let line = "Version: ImageMagick 7.1.2-35 Q16-HDRI aarch64 acaf7e418:20261031 https://imagemagick.org";
+        assert_eq!(parse_magick_version(line), Some((7, 1, 2, 35)));
+        assert_eq!(parse_magick_version("Version: ImageMagick 6.9.11-60 Q16 x86_64 2021-01-25"), Some((6, 9, 11, 60)));
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1.2 Q16"), None);
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1-2 Q16"), None);
+        assert_eq!(parse_magick_version("Version: ImageMagick 7.1.2.3-4 Q16"), None);
+        assert_eq!(parse_magick_version("ImageMagick"), None);
+        assert_eq!(parse_magick_version(""), None);
+    }
+
+    /// Needs ImageMagick. Pictures the wheel only reads get the picture tools, and the
+    /// result is a PNG: a Photoshop file halved, a Targa (known by its extension) turned,
+    /// a DDS cropped; the editors' preview reads them the same way.
+    #[test]
+    fn tools_on_pictures_the_wheel_only_reads_make_pngs() {
+        if magick().is_err() {
+            eprintln!("ImageMagick isn't installed: tools on read-only pictures not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let path = work.path().join(name);
+            let ok = Command::new(magick().unwrap()).args(["-size", "64x48", "xc:red"]).arg(&path).status().unwrap().success();
+            assert!(ok, "{name}");
+            path
+        };
+        let psd = make("layers.psd");
+        let half = convert(&psd, "tool:half", None, work.path()).unwrap();
+        assert_eq!(half, work.path().join("layers (half size).png"));
+        assert!(read_head(&half).unwrap().starts_with(b"\x89PNG"));
+        assert_eq!(picture_size(&half), "32x24");
+
+        let tga = make("old.tga");
+        let turned = convert(&tga, "tool:rotate", None, work.path()).unwrap();
+        assert_eq!(turned, work.path().join("old (rotated).png"));
+        assert_eq!(picture_size(&turned), "48x64");
+        assert_eq!(preview(&tga).map(|(w, h, _)| (w, h)), Ok((64, 48)));
+
+        let dds = make("texture.dds");
+        let crop = Crop { x: 8, y: 4, width: 20, height: 10, turns: 0 };
+        let control = Control::with_edit(Quality::default(), Some(Edit::Crop(crop)));
+        let cropped = under(&control, || convert(&dds, "tool:crop", None, work.path())).unwrap();
+        assert_eq!(cropped, work.path().join("texture (cropped).png"));
+        assert_eq!(picture_size(&cropped), "20x10");
+
+        // Remove Metadata keeps a picture's format, which the wheel can't write here.
+        assert!(convert(&psd, "tool:clean", None, work.path()).is_err());
+    }
+
+    /// Needs ffmpeg. Video and sound the wheel only reads get the tools that write anew:
+    /// a camcorder's MPEG-TS compressed, cut and turned into a picture; a Dolby AC3 track
+    /// evened out into M4A; a WavPack file mixed down into FLAC, so nothing is lost.
+    #[test]
+    fn tools_on_video_and_sound_the_wheel_only_reads() {
+        if tool("ffmpeg").is_err() || tool("ffprobe").is_err() {
+            eprintln!("ffmpeg isn't installed: tools on read-only video and sound not tested");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let make = |args: &[&str], out: &Path| {
+            let ok = Command::new(tool("ffmpeg").unwrap()).args(["-v", "error"]).args(args).arg(out).status().unwrap().success();
+            assert!(ok, "{}", out.display());
+        };
+        let mts = work.path().join("camcorder.mts");
+        make(
+            &["-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=3", "-f", "lavfi", "-i", "sine=frequency=440:duration=3"]
+                .into_iter()
+                .chain(["-c:v", "mpeg2video", "-c:a", "ac3", "-f", "mpegts"])
+                .collect::<Vec<_>>(),
+            &mts,
+        );
+        let small = convert(&mts, "tool:compress", None, work.path()).unwrap();
+        assert_eq!(small, work.path().join("camcorder (compressed).mp4"));
+        assert!(streams(&small).contains("h264") && streams(&small).contains("aac"), "{}", streams(&small));
+        let control = Control::with_edit(Quality::default(), Some(Edit::Trim(Trim { start_ms: 500, end_ms: 1500 })));
+        let cut = under(&control, || convert(&mts, "tool:trim", None, work.path())).unwrap();
+        assert_eq!(cut, work.path().join("camcorder (trimmed).mp4"));
+        let length = media_length(&cut, &work.path().join("probe")).unwrap().as_millis();
+        assert!((900..=1200).contains(&length), "{length} ms");
+        let still = convert(&mts, "tool:still", None, work.path()).unwrap();
+        assert_eq!(still, work.path().join("camcorder (first frame).jpg"));
+        // Mute copies the picture as it is, which an MP4 may not hold: not offered.
+        assert!(convert(&mts, "tool:mute", None, work.path()).is_err());
+
+        let ac3 = work.path().join("speech.ac3");
+        make(&["-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-ac", "2", "-c:a", "ac3"], &ac3);
+        let even = convert(&ac3, "tool:loudness", None, work.path()).unwrap();
+        assert_eq!(even, work.path().join("speech (even loudness).m4a"));
+        assert!(streams(&even).contains("aac"), "{}", streams(&even));
+
+        let wv = work.path().join("song.wv");
+        make(&["-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-ac", "2", "-c:a", "wavpack"], &wv);
+        let mono = convert(&wv, "tool:mono", None, work.path()).unwrap();
+        assert_eq!(mono, work.path().join("song (mono).flac"));
+        assert!(probe(&mono).contains("channels=1"), "{}", probe(&mono));
+        assert!(streams(&mono).contains("flac"), "{}", streams(&mono));
+    }
+
+    #[test]
+    fn an_imagemagick_older_than_the_last_high_fix_is_refused() {
+        assert!(magick_new_enough((7, 1, 2, 33)).is_ok());
+        assert!(magick_new_enough((7, 1, 2, 36)).is_ok());
+        assert!(magick_new_enough((7, 1, 3, 0)).is_ok());
+        let old = magick_new_enough((7, 1, 2, 32)).unwrap_err();
+        assert!(old.starts_with("ImageMagick 7.1.2-32 is too old: 7.1.2-33 or newer"), "{old}");
+        assert!(old.contains("Update Converters"), "{old}");
+        assert!(magick_new_enough((7, 1, 1, 47)).is_err());
+        assert!(magick_new_enough((6, 9, 13, 30)).is_err());
+        // A "too old" error is not "not installed": Install would not help, Update would.
+        assert!(missing(&old).is_none());
     }
 
     #[test]
