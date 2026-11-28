@@ -1,6 +1,6 @@
 [package]
 name = "pirouette"
-version = "0.4.1"
+version = "0.4.2"
 license = "MIT"
 description = "Hold Shift while dragging a file to pick a format to convert it to"
 edition = "2021"
