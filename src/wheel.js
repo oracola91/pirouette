@@ -491,7 +491,7 @@ listen('wheel-show', (event) => {
   document.documentElement.classList.toggle('solid', event.payload?.glass !== true);
   const highlight = event.payload?.highlight;
   document.documentElement.dataset.highlight = HIGHLIGHTS.includes(highlight) ? highlight : 'orange';
-  // Wheel Glass: a plain solid disc, or Liquid Glass at the slider's transparency.
+  // Wheel Glass: a plain solid disc, or glass at the slider's transparency.
   const look = event.payload?.look;
   const share = (v, fallback) => (Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback);
   document.documentElement.classList.toggle('plain', look?.plain === true);
