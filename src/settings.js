@@ -239,7 +239,7 @@ function wheel(v) {
   const look = group(
     'Look',
     row('Highlight colour', swatches),
-    row(mac ? 'Liquid Glass' : 'See-through', glass, mac ? 'Off: a plain solid wheel.' : 'Off: a solid wheel.'),
+    row(mac ? 'Glass' : 'See-through', glass, mac ? 'Off: a plain solid wheel.' : 'Off: a solid wheel.'),
     row('Transparency', h('div', { class: 'ends' }, mac ? 'Frosted' : 'Less', slider, mac ? 'Clear' : 'More')),
     row(
       'Wheel size',

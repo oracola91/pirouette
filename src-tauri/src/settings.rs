@@ -105,9 +105,10 @@ pub struct Settings {
     /// The shelf at the top of the screen is switched off (it is on unless chosen so).
     pub shelf_off: bool,
     pub highlight: Highlight,
-    /// The wheel is a plain solid disc instead of Liquid Glass (macOS).
+    /// The wheel is a plain solid disc instead of glass (macOS). The saved name keeps
+    /// its old wording so the choice carries over from earlier versions.
     pub no_liquid_glass: bool,
-    /// How see-through the Liquid Glass wheel is (macOS), from the menu's slider.
+    /// How see-through the glass wheel is (macOS), from the menu's slider.
     pub transparency: Transparency,
     /// Which keys open each wheel, from the menu's Keys.
     pub keys: Keys,
@@ -330,7 +331,7 @@ impl Highlight {
     }
 }
 
-/// How see-through the Liquid Glass wheel is: 0 is frosted (the frosted material at
+/// How see-through the glass wheel is: 0 is frosted (the frosted material at
 /// full strength behind it and the most white on the segments), 100 is clear (no
 /// blur and next to no white; only the patches behind the words stay frosted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn liquid_glass_is_on_at_half_transparency_unless_chosen() {
+    fn glass_is_on_at_half_transparency_unless_chosen() {
         // Older settings, also ones with the "glass" choice of earlier test builds.
         for old in [r#"{"save_to":"downloads","hidden":[]}"#, r#"{"glass":"medium"}"#] {
             let s: Settings = serde_json::from_str(old).unwrap();

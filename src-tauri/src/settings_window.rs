@@ -102,7 +102,7 @@ pub struct View {
     arrows: Option<bool>,
     highlight: &'static str,
     colors: Vec<ColorView>,
-    /// Liquid Glass (macOS) or See-through (Windows, Linux).
+    /// Glass (macOS) or See-through (Windows, Linux).
     glass: bool,
     transparency: u8,
     quality: Vec<QualityView>,

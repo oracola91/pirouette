@@ -112,7 +112,7 @@ struct WheelShow {
     look: Option<Look>,
 }
 
-/// Wheel Glass for the page: a plain solid disc, or Liquid Glass with this much white
+/// Wheel Glass for the page: a plain solid disc, or glass with this much white
 /// on the segments. The frosted patches behind the words are native (wheel_window.rs).
 #[derive(Clone, Copy, Serialize)]
 struct Look {
